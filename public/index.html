@@ -589,61 +589,77 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
   const streamRef = React.useRef(null);
   const [cameraReady, setCameraReady] = React.useState(false);
   const [cameraErr, setCameraErr] = React.useState(null);
+  const [cameras, setCameras] = React.useState([]); // enumerated videoinput devices
+  const [activeCameraIdx, setActiveCameraIdx] = React.useState(0);
+  const [debugOpen, setDebugOpen] = React.useState(false);
+  const [debugInfo, setDebugInfo] = React.useState(null);
+
+  // Start or restart the camera stream with a specific deviceId (or facingMode on first run)
+  const startStream = React.useCallback(async (deviceId) => {
+    // Stop any existing stream
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
+    }
+    setCameraReady(false);
+
+    const constraints = deviceId
+      ? { video: { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }
+      : { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false };
+
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    streamRef.current = stream;
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+      videoRef.current.play().catch(() => {});
+    }
+
+    const track = stream.getVideoTracks()[0];
+    let caps = {}, settings = {};
+    try {
+      caps = track.getCapabilities ? track.getCapabilities() : {};
+      settings = track.getSettings ? track.getSettings() : {};
+      const advanced = [];
+      if (caps.focusMode?.includes('continuous')) advanced.push({ focusMode: 'continuous' });
+      if (caps.zoom) advanced.push({ zoom: caps.zoom.min ?? 1 });
+      if (caps.whiteBalanceMode?.includes('continuous')) advanced.push({ whiteBalanceMode: 'continuous' });
+      if (caps.exposureMode?.includes('continuous')) advanced.push({ exposureMode: 'continuous' });
+      if (advanced.length) await track.applyConstraints({ advanced });
+    } catch (e) {
+      console.warn('[flora] constraint tuning failed', e);
+    }
+
+    setCameraReady(true);
+    setDebugInfo({
+      label: track.label,
+      deviceId: settings.deviceId,
+      settings: track.getSettings?.() ?? settings,
+      caps,
+    });
+  }, []);
 
   React.useEffect(() => {
     let cancelled = false;
+
     (async () => {
       try {
-        if (!navigator.mediaDevices?.getUserMedia) {
-          throw new Error('Camera API not available');
-        }
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: 'environment' },
-            // Moderate resolution — high enough for plant ID, avoids forcing
-            // the browser to pick a telephoto sensor on multi-camera phones.
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-          },
-          audio: false,
-        });
-        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.play().catch(() => {});
-        }
+        if (!navigator.mediaDevices?.getUserMedia) throw new Error('Camera API not available');
+        await startStream(null); // initial — facingMode environment
 
-        // Try to force zoom back to 1x and enable continuous autofocus.
-        // Both are behind browser capability flags — silently skip if unsupported.
-        const track = stream.getVideoTracks()[0];
-        try {
-          const caps = track.getCapabilities ? track.getCapabilities() : {};
-          const advanced = [];
-          if (caps.focusMode && caps.focusMode.includes('continuous')) {
-            advanced.push({ focusMode: 'continuous' });
-          }
-          if (caps.zoom) {
-            advanced.push({ zoom: caps.zoom.min ?? 1 });
-          }
-          if (caps.whiteBalanceMode && caps.whiteBalanceMode.includes('continuous')) {
-            advanced.push({ whiteBalanceMode: 'continuous' });
-          }
-          if (caps.exposureMode && caps.exposureMode.includes('continuous')) {
-            advanced.push({ exposureMode: 'continuous' });
-          }
-          if (advanced.length) {
-            await track.applyConstraints({ advanced });
-          }
-          console.info('[flora] camera caps', caps, 'settings', track.getSettings?.());
-        } catch (e) {
-          console.warn('[flora] camera constraint tuning failed', e);
-        }
-        setCameraReady(true);
+        // Enumerate after permission — labels only populate post-grant
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        if (cancelled) return;
+        const videoIns = devices.filter(d => d.kind === 'videoinput');
+        setCameras(videoIns);
+        // Figure out which index is active (match by label or deviceId)
+        const curId = streamRef.current?.getVideoTracks()[0]?.getSettings().deviceId;
+        const idx = videoIns.findIndex(d => d.deviceId === curId);
+        if (idx >= 0) setActiveCameraIdx(idx);
       } catch (e) {
         if (!cancelled) setCameraErr(e.message || 'Camera unavailable');
       }
     })();
+
     return () => {
       cancelled = true;
       if (streamRef.current) {
@@ -651,7 +667,18 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
         streamRef.current = null;
       }
     };
-  }, []);
+  }, [startStream]);
+
+  const cycleCamera = async () => {
+    if (cameras.length < 2) return;
+    const next = (activeCameraIdx + 1) % cameras.length;
+    setActiveCameraIdx(next);
+    try {
+      await startStream(cameras[next].deviceId);
+    } catch (e) {
+      console.warn('Camera switch failed', e);
+    }
+  };
 
   React.useEffect(() => {
     let cancelled = false;
@@ -780,16 +807,71 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
         <div style={{
           position: 'absolute', top: `calc(16px + env(safe-area-inset-top))`, left: 0, right: 0,
           display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-          padding: '0 16px', zIndex: 10,
+          padding: '0 16px', zIndex: 10, gap: 8,
         }}>
           <GlassChip onClick={onOpenJournal}>
             <IconBook size={16} stroke={THEME.ink} />
             <span style={{ fontSize: 13, fontWeight: 600, color: THEME.ink }}>Journal</span>
           </GlassChip>
-          <GlassChip>
-            <IconFlash size={16} stroke={THEME.ink} />
-          </GlassChip>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {cameras.length > 1 && (
+              <GlassChip onClick={cycleCamera}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={THEME.ink} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M23 4v6h-6M1 20v-6h6" />
+                  <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
+                </svg>
+                <span style={{ fontSize: 11, fontWeight: 700, color: THEME.ink }}>{activeCameraIdx + 1}/{cameras.length}</span>
+              </GlassChip>
+            )}
+            <GlassChip onClick={() => setDebugOpen(!debugOpen)}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: THEME.ink, lineHeight: 1 }}>ⓘ</span>
+            </GlassChip>
+          </div>
         </div>
+
+        {/* Debug panel — camera diagnostics */}
+        {debugOpen && (
+          <div style={{
+            position: 'absolute',
+            top: `calc(70px + env(safe-area-inset-top))`,
+            left: 12, right: 12, zIndex: 20,
+            background: 'rgba(0,0,0,0.82)', color: '#fff',
+            backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)',
+            padding: 12, borderRadius: 14,
+            fontSize: 11, lineHeight: 1.5,
+            fontFamily: "ui-monospace, SFMono-Regular, monospace",
+            maxHeight: '60%', overflow: 'auto',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+              <strong>Camera debug</strong>
+              <button onClick={() => setDebugOpen(false)} style={{ color: '#fff', fontSize: 14, fontWeight: 700, padding: '0 6px' }}>×</button>
+            </div>
+            <div style={{ opacity: 0.7, marginBottom: 4 }}>Active: {debugInfo?.label || '(unnamed)'}</div>
+            {debugInfo?.settings && (
+              <div>
+                res: {debugInfo.settings.width}×{debugInfo.settings.height}
+                {debugInfo.settings.frameRate ? ` @${Math.round(debugInfo.settings.frameRate)}fps` : ''}
+                {debugInfo.settings.zoom != null ? ` · zoom ${debugInfo.settings.zoom}×` : ''}
+              </div>
+            )}
+            {debugInfo?.caps?.zoom && (
+              <div>zoom range: {debugInfo.caps.zoom.min}–{debugInfo.caps.zoom.max} (step {debugInfo.caps.zoom.step})</div>
+            )}
+            {debugInfo?.caps?.focusMode && (
+              <div>focus: {debugInfo.caps.focusMode.join(', ')}</div>
+            )}
+            <div style={{ marginTop: 8, fontWeight: 700 }}>All cameras ({cameras.length}):</div>
+            {cameras.map((c, i) => (
+              <div key={c.deviceId} onClick={() => { setActiveCameraIdx(i); startStream(c.deviceId).catch(() => {}); }} style={{
+                padding: '4px 6px', marginTop: 2, borderRadius: 4,
+                background: i === activeCameraIdx ? 'rgba(168,215,140,0.25)' : 'transparent',
+                cursor: 'pointer',
+              }}>
+                {i === activeCameraIdx ? '→ ' : '  '}[{i}] {c.label || '(unnamed device)'}
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Coaching text — adapts to camera state */}
         <div style={{
