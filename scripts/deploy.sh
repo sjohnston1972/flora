@@ -66,7 +66,7 @@ UPLOAD_RESP=$(curl -s -X PUT "${AUTH[@]}" \
   -F "metadata=${METADATA};type=application/json" \
   -F "worker.js=@build/worker.js;type=application/javascript+module")
 
-echo "${UPLOAD_RESP}" | grep -q '"success":true' || {
+echo "${UPLOAD_RESP}" | grep -qE '"success":\s*true' || {
   echo "${UPLOAD_RESP}" >&2
   die "Worker upload failed"
 }
@@ -84,7 +84,7 @@ SECRET_RESP=$(curl -s -X PUT "${AUTH[@]}" \
   -H "Content-Type: application/json" \
   "${API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${WORKER_NAME}/secrets" \
   --data "${SECRET_BODY}")
-echo "${SECRET_RESP}" | grep -q '"success":true' || {
+echo "${SECRET_RESP}" | grep -qE '"success":\s*true' || {
   echo "${SECRET_RESP}" >&2
   die "Failed to set secret"
 }
@@ -105,7 +105,7 @@ DOMAIN_RESP=$(curl -s -X PUT "${AUTH[@]}" \
   -H "Content-Type: application/json" \
   "${API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/domains" \
   --data "${DOMAIN_BODY}")
-if echo "${DOMAIN_RESP}" | grep -q '"success":true'; then
+if echo "${DOMAIN_RESP}" | grep -qE '"success":\s*true'; then
   ok "Custom domain bound"
 elif echo "${DOMAIN_RESP}" | grep -q 'already exists'; then
   ok "Custom domain already bound"
