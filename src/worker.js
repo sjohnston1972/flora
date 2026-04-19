@@ -6,10 +6,13 @@
 // Env bindings required (set via scripts/deploy.sh or wrangler):
 //   ANTHROPIC_API_KEY — secret used for the Claude Vision call
 
+// Decode to raw bytes (NOT a JS string) so multi-byte UTF-8 chars like em-dash
+// and emojis survive the round-trip. Using a string + Response() would re-encode
+// each binary byte as UTF-8, doubling the encoding.
 // eslint-disable-next-line no-undef
-const INDEX_HTML = typeof INDEX_HTML_B64 !== 'undefined'
-  ? atob(INDEX_HTML_B64)
-  : '<h1>Not bundled — run scripts/build.sh</h1>';
+const INDEX_HTML_BYTES = typeof INDEX_HTML_B64 !== 'undefined'
+  ? Uint8Array.from(atob(INDEX_HTML_B64), c => c.charCodeAt(0))
+  : new TextEncoder().encode('<h1>Not bundled — run scripts/build.sh</h1>');
 
 const IDENTIFY_SYSTEM_PROMPT = `You are a botanist identifying plants from photographs. For each image, return up to 3 plausible matches, ordered by confidence (highest first). Respond with JSON ONLY — no prose, no markdown fences.
 
@@ -130,10 +133,11 @@ function json(data, status = 200) {
 }
 
 function serveHtml() {
-  return new Response(INDEX_HTML, {
+  return new Response(INDEX_HTML_BYTES, {
     headers: {
       'content-type': 'text/html; charset=utf-8',
-      'cache-control': 'public, max-age=300',
+      // Short TTL so deploys propagate quickly. Browser revalidates every minute.
+      'cache-control': 'public, max-age=0, must-revalidate',
     },
   });
 }

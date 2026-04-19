@@ -11,6 +11,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Nunito+Sans:wght@400;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="anonymous"></script>
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body {
@@ -179,6 +181,96 @@ const pickColors = (tox) => {
   if (tox === 'toxic')  return ['#8a5a2b', '#b88a4f', '#e0c49a'];
   return ['#2d5a3d', '#4a7c5a', '#8cb89a'];
 };
+
+// ── iNaturalist + geolocation ──────────────────────────────
+const INAT_BASE = 'https://api.inaturalist.org/v1';
+
+// Cache the geolocation prompt so we only ask once per page session.
+let __geoPromise = null;
+function getGeo() {
+  if (__geoPromise) return __geoPromise;
+  __geoPromise = new Promise((resolve, reject) => {
+    if (!navigator.geolocation) return reject(new Error('Geolocation not supported'));
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      (err) => reject(new Error(err.message || 'Location denied')),
+      { timeout: 10000, maximumAge: 10 * 60 * 1000, enableHighAccuracy: false }
+    );
+  });
+  return __geoPromise;
+}
+
+// Shape an iNat taxon into a Flora plant-like object.
+function taxonToPlant(taxon, photoUrl) {
+  return {
+    id: 't' + taxon.id,
+    taxonId: taxon.id,
+    name: taxon.name,
+    common: taxon.preferred_common_name || taxon.name,
+    family: '—',
+    colors: ['#2d5a3d', '#4a7c5a', '#8cb89a'],
+    photo: 'linear-gradient(135deg, #1f3a28 0%, #2d5a3d 35%, #4a7c5a 70%, #8cb89a 100%)',
+    photoUrl,
+    leafShape: pickLeafShape(taxon.preferred_common_name || taxon.name),
+    tagline: '',
+    native: '—', habitat: '—', edibility: '—',
+    bloom: { months: [], label: '—' },
+    toxicity: { level: 'unknown', note: 'Toxicity not determined from iNaturalist data.' },
+    care: { light: '—', water: '—', humidity: '—', temp: '—' },
+    nearby: null, tags: [],
+  };
+}
+
+async function inatNearbyPlants(lat, lng) {
+  const url = new URL(INAT_BASE + '/observations');
+  url.searchParams.set('taxon_id', '47126'); // Plantae
+  url.searchParams.set('lat', String(lat));
+  url.searchParams.set('lng', String(lng));
+  url.searchParams.set('radius', '25');
+  url.searchParams.set('per_page', '30');
+  url.searchParams.set('photos', 'true');
+  url.searchParams.set('quality_grade', 'research');
+  url.searchParams.set('order_by', 'observed_on');
+  url.searchParams.set('order', 'desc');
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('iNaturalist ' + res.status);
+  const data = await res.json();
+  const seen = new Set();
+  const out = [];
+  for (const obs of (data.results || [])) {
+    const t = obs.taxon;
+    if (!t || seen.has(t.id)) continue;
+    seen.add(t.id);
+    const raw = obs.photos?.[0]?.url || null;
+    const photo = raw ? raw.replace('square', 'medium') : null;
+    out.push(taxonToPlant(t, photo));
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
+async function inatLookupTaxonId(scientificName) {
+  if (!scientificName) return null;
+  const url = new URL(INAT_BASE + '/taxa');
+  url.searchParams.set('q', scientificName);
+  url.searchParams.set('per_page', '1');
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  const data = await res.json();
+  return data.results?.[0]?.id || null;
+}
+
+async function inatObservationsForTaxon(taxonId, lat, lng, radiusKm = 50) {
+  const url = new URL(INAT_BASE + '/observations');
+  url.searchParams.set('taxon_id', String(taxonId));
+  url.searchParams.set('lat', String(lat));
+  url.searchParams.set('lng', String(lng));
+  url.searchParams.set('radius', String(radiusKm));
+  url.searchParams.set('per_page', '100');
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('iNaturalist ' + res.status);
+  return res.json();
+}
 </script>
 
 <!-- ============================================================
@@ -345,21 +437,25 @@ function GlassChip({ children, onClick }) {
   );
 }
 
-function NearbyCard({ plant }) {
-  // Immersive (tall) layout — locked default from TWEAKS_DEFAULTS
+function NearbyCard({ plant, onClick }) {
+  const bg = plant.photoUrl
+    ? `center/cover url(${plant.photoUrl})`
+    : plant.photo;
   return (
-    <div style={{
+    <div onClick={onClick} style={{
       flexShrink: 0, width: 150, height: 220, borderRadius: THEME.radiusSm,
-      background: plant.photo, color: '#fff', position: 'relative',
+      background: bg, color: '#fff', position: 'relative',
       overflow: 'hidden', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
-      padding: 12,
+      padding: 12, cursor: onClick ? 'pointer' : 'default',
     }}>
       <div style={{
         position: 'absolute', inset: 0,
         background: 'linear-gradient(180deg, transparent 40%, rgba(0,0,0,0.65))',
       }} />
       <div style={{ position: 'relative', zIndex: 1 }}>
-        <ToxBadge tox={plant.toxicity.level} small />
+        {plant.toxicity?.level && plant.toxicity.level !== 'unknown' && (
+          <ToxBadge tox={plant.toxicity.level} small />
+        )}
         <div style={{ fontFamily: FONTS.heading, fontSize: 20, fontWeight: 600, marginTop: 6, lineHeight: 1.05 }}>
           {plant.common}
         </div>
@@ -456,12 +552,28 @@ function addJournalEntry(entry) {
      SCREEN — HOME (camera capture)
      ============================================================ -->
 <script type="text/babel">
-function HomeScreen({ onCapture, onOpenJournal, recentCount }) {
+function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
   const [focusPoint, setFocusPoint] = React.useState({ x: 50, y: 50 });
   const [capturing, setCapturing] = React.useState(false);
   const [sheetOpen, setSheetOpen] = React.useState(false);
+  const [nearby, setNearby] = React.useState(null); // null = loading, [] = empty/denied, [...] = data
+  const [nearbyErr, setNearbyErr] = React.useState(null);
   const fileRef = React.useRef(null);
   const recentJournal = React.useMemo(() => loadJournal().slice(0, 3), [sheetOpen]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { lat, lng } = await getGeo();
+        const plants = await inatNearbyPlants(lat, lng);
+        if (!cancelled) setNearby(plants);
+      } catch (e) {
+        if (!cancelled) { setNearbyErr(e.message || 'Location unavailable'); setNearby([]); }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const handleViewfinderTap = (e) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -518,22 +630,6 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount }) {
           overflow: 'hidden',
         }}
       >
-        <svg width="100%" height="100%" viewBox="0 0 400 600" preserveAspectRatio="xMidYMid slice" style={{ position: 'absolute', inset: 0 }}>
-          <defs><filter id="blur1"><feGaussianBlur stdDeviation="8" /></filter></defs>
-          <g filter="url(#blur1)" opacity="0.85">
-            <ellipse cx="80" cy="150" rx="120" ry="80" fill={THEME.accentDeep} />
-            <ellipse cx="320" cy="100" rx="100" ry="70" fill={THEME.accent} />
-            <ellipse cx="200" cy="400" rx="180" ry="100" fill={THEME.accentGlow} />
-            <ellipse cx="350" cy="500" rx="90" ry="60" fill={THEME.accent} />
-          </g>
-          <g transform="translate(140, 140)" opacity="0.95">
-            <path d="M60 0 Q 10 30 10 100 Q 10 170 60 200 Q 130 200 150 120 Q 150 30 100 10 Q 80 0 60 0 Z" fill={THEME.accentDeep} />
-            <ellipse cx="50" cy="60" rx="8" ry="18" fill={THEME.accent} opacity="0.8" />
-            <ellipse cx="80" cy="90" rx="10" ry="20" fill={THEME.accent} opacity="0.8" />
-            <ellipse cx="60" cy="130" rx="9" ry="17" fill={THEME.accent} opacity="0.8" />
-            <ellipse cx="100" cy="150" rx="8" ry="15" fill={THEME.accent} opacity="0.8" />
-          </g>
-        </svg>
 
         <FocusReticle x={focusPoint.x} y={focusPoint.y} capturing={capturing} />
 
@@ -580,15 +676,21 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount }) {
         boxShadow: '0 -8px 30px rgba(0,0,0,0.08)',
         display: 'flex', flexDirection: 'column',
       }}>
-        <div
+        <button
           onClick={() => setSheetOpen(!sheetOpen)}
-          style={{ padding: '10px 0 6px', display: 'flex', justifyContent: 'center', cursor: 'pointer' }}
+          aria-label={sheetOpen ? 'Collapse panel' : 'Expand panel'}
+          style={{
+            padding: '16px 0 10px', width: '100%',
+            display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 6,
+            cursor: 'pointer', background: 'transparent',
+          }}
         >
           <div style={{
-            width: 44, height: 5, borderRadius: 3,
-            background: THEME.inkMuted, opacity: 0.3,
+            width: 56, height: 5, borderRadius: 3,
+            background: THEME.inkMuted, opacity: sheetOpen ? 0.5 : 0.3,
+            transition: 'opacity 200ms',
           }} />
-        </div>
+        </button>
 
         {/* Capture controls */}
         <div style={{
@@ -674,14 +776,27 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount }) {
               fontFamily: FONTS.heading, fontSize: 28, margin: 0,
               fontWeight: 500, letterSpacing: -0.3,
             }}>Near you today</h3>
-            <span style={{ fontSize: 12, color: THEME.inkMuted }}>42 species</span>
+            <span style={{ fontSize: 12, color: THEME.inkMuted }}>
+              {nearby == null
+                ? 'loading…'
+                : nearby.length > 0
+                  ? `${nearby.length} species`
+                  : nearbyErr ? 'offline' : '—'}
+            </span>
           </div>
           <div style={{
             display: 'flex', gap: 10, overflowX: 'auto',
             margin: '0 -20px', padding: '0 20px 4px',
           }}>
-            {PLANTS.map(p => <NearbyCard key={p.id} plant={p} />)}
+            {(nearby && nearby.length ? nearby : PLANTS).map(p => (
+              <NearbyCard key={p.id} plant={p} onClick={() => onSelectPlant && onSelectPlant(p)} />
+            ))}
           </div>
+          {nearbyErr && (
+            <div style={{ fontSize: 11, color: THEME.inkMuted, marginTop: -4 }}>
+              Showing seed species · allow location for real nearby plants
+            </div>
+          )}
           {sheetOpen && (
             <div style={{ marginTop: 4 }}>
               <div style={{
@@ -1276,6 +1391,78 @@ function CareTab({ plant }) {
 }
 
 function NearbyTab({ plant }) {
+  const mapRef = React.useRef(null);
+  const mapInstance = React.useRef(null);
+  const [total, setTotal] = React.useState(null);
+  const [nearest, setNearest] = React.useState(null);
+  const [err, setErr] = React.useState(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const [{ lat, lng }, taxonId] = await Promise.all([
+          getGeo(),
+          plant.taxonId ? Promise.resolve(plant.taxonId) : inatLookupTaxonId(plant.name),
+        ]);
+        if (!taxonId) throw new Error('Species not in iNaturalist');
+        const data = await inatObservationsForTaxon(taxonId, lat, lng, 50);
+        if (cancelled) return;
+
+        setTotal(data.total_results ?? 0);
+
+        if (!window.L || !mapRef.current) return;
+
+        // Init map
+        const map = window.L.map(mapRef.current, {
+          zoomControl: false, attributionControl: false, scrollWheelZoom: false,
+        }).setView([lat, lng], 11);
+        mapInstance.current = map;
+
+        window.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          maxZoom: 18,
+        }).addTo(map);
+
+        // "You are here" — pulsing orange marker
+        const meIcon = window.L.divIcon({
+          className: '',
+          html: `<div style="width:16px;height:16px;border-radius:50%;background:${THEME.warm};border:3px solid #fff;box-shadow:0 0 0 4px ${THEME.warm}44"></div>`,
+          iconSize: [16, 16], iconAnchor: [8, 8],
+        });
+        window.L.marker([lat, lng], { icon: meIcon, keyboard: false }).addTo(map);
+
+        // Observations of this species
+        let closestKm = null;
+        for (const obs of (data.results || [])) {
+          if (!obs.location) continue;
+          const [oLat, oLng] = obs.location.split(',').map(Number);
+          if (!Number.isFinite(oLat) || !Number.isFinite(oLng)) continue;
+          const d = haversineKm(lat, lng, oLat, oLng);
+          if (closestKm == null || d < closestKm) closestKm = d;
+          const pinIcon = window.L.divIcon({
+            className: '',
+            html: `<div style="width:12px;height:12px;border-radius:50%;background:${THEME.accent};border:2px solid #fff"></div>`,
+            iconSize: [12, 12], iconAnchor: [6, 6],
+          });
+          window.L.marker([oLat, oLng], { icon: pinIcon })
+            .bindTooltip(`${obs.observed_on || '—'}${obs.place_guess ? ' · ' + obs.place_guess : ''}`, {
+              direction: 'top', offset: [0, -6],
+            })
+            .addTo(map);
+        }
+        if (closestKm != null) setNearest(closestKm);
+      } catch (e) {
+        if (!cancelled) setErr(e.message || 'Could not load map');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (mapInstance.current) { mapInstance.current.remove(); mapInstance.current = null; }
+    };
+  }, [plant.taxonId, plant.name]);
+
   return (
     <div>
       <div style={{
@@ -1285,53 +1472,53 @@ function NearbyTab({ plant }) {
       }}>
         <div>
           <div style={{ fontSize: 12, opacity: 0.8, fontWeight: 600, letterSpacing: 0.5, textTransform: 'uppercase' }}>
-            Around you
+            Around you (50 km)
           </div>
           <div style={{ fontFamily: FONTS.heading, fontSize: 32, fontWeight: 500, marginTop: 2 }}>
-            {plant.nearby ?? '—'} sightings
+            {total == null ? (err ? '—' : '…') : total.toLocaleString()} sightings
           </div>
         </div>
         <div style={{ fontSize: 44 }}>🌿</div>
       </div>
       <div style={{
-        height: 220, borderRadius: THEME.radiusSm, position: 'relative',
-        background: `
-          linear-gradient(135deg, ${THEME.accentSoft}44 0%, ${THEME.accentGlow}44 50%, ${THEME.accentSoft}44 100%),
-          ${THEME.surface}
-        `,
+        height: 260, borderRadius: THEME.radiusSm, position: 'relative',
         overflow: 'hidden', boxShadow: THEME.shadow,
+        background: THEME.surfaceAlt,
       }}>
-        <svg width="100%" height="100%" viewBox="0 0 400 220" preserveAspectRatio="xMidYMid slice">
-          <path d="M0 70 Q 150 40 400 100" fill="none" stroke={THEME.accentSoft} strokeWidth="18" />
-          <path d="M0 70 Q 150 40 400 100" fill="none" stroke="#fff" strokeWidth="2" />
-          <path d="M200 0 L 180 220" fill="none" stroke={THEME.accentSoft} strokeWidth="16" />
-          <path d="M200 0 L 180 220" fill="none" stroke="#fff" strokeWidth="2" />
-          <ellipse cx="80" cy="150" rx="60" ry="40" fill={THEME.accentGlow} opacity="0.4" />
-          <ellipse cx="320" cy="170" rx="50" ry="30" fill={THEME.accentGlow} opacity="0.4" />
-          {[[90, 140], [130, 165], [70, 170], [310, 175], [330, 160], [200, 110], [230, 90]].map(([x, y], i) => (
-            <g key={i}>
-              <circle cx={x} cy={y} r="10" fill={THEME.accent} opacity="0.3" />
-              <circle cx={x} cy={y} r="5" fill={THEME.accent} />
-              <circle cx={x} cy={y} r="5" fill="none" stroke="#fff" strokeWidth="1.5" />
-            </g>
-          ))}
-          <g>
-            <circle cx="200" cy="140" r="22" fill={THEME.warm} opacity="0.25">
-              <animate attributeName="r" values="20;30;20" dur="2s" repeatCount="indefinite" />
-            </circle>
-            <circle cx="200" cy="140" r="9" fill={THEME.warm} />
-            <circle cx="200" cy="140" r="9" fill="none" stroke="#fff" strokeWidth="2.5" />
-          </g>
-        </svg>
-        <div style={{
-          position: 'absolute', bottom: 10, left: 10,
-          background: 'rgba(255,255,255,0.9)', backdropFilter: 'blur(10px)',
-          padding: '6px 10px', borderRadius: 999,
-          fontSize: 11, fontWeight: 600, color: THEME.ink,
-        }}>📍 Nearest: 0.3 km</div>
+        <div ref={mapRef} style={{ position: 'absolute', inset: 0 }} />
+        {err && (
+          <div style={{
+            position: 'absolute', inset: 0,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 13, color: THEME.inkMuted, textAlign: 'center', padding: 20,
+          }}>
+            {err}
+          </div>
+        )}
+        {nearest != null && !err && (
+          <div style={{
+            position: 'absolute', bottom: 10, left: 10,
+            background: 'rgba(255,255,255,0.92)', backdropFilter: 'blur(10px)',
+            padding: '6px 10px', borderRadius: 999,
+            fontSize: 11, fontWeight: 600, color: THEME.ink, zIndex: 500,
+          }}>📍 Nearest: {nearest < 1 ? `${Math.round(nearest * 1000)} m` : `${nearest.toFixed(1)} km`}</div>
+        )}
       </div>
+      <div style={{
+        fontSize: 11, color: THEME.inkMuted, marginTop: 8, textAlign: 'right',
+      }}>Data · <a href="https://www.inaturalist.org" target="_blank" rel="noopener" style={{ color: THEME.inkMuted }}>iNaturalist</a> · © OpenStreetMap</div>
     </div>
   );
+}
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat/2)**2 +
+    Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) *
+    Math.sin(dLon/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(a));
 }
 
 function SimilarTab({ plant }) {
@@ -1542,6 +1729,7 @@ function normaliseMatch(m) {
 
 function FloraApp() {
   const [screen, setScreen] = React.useState('home');
+  const [detailReturn, setDetailReturn] = React.useState('results'); // which screen detail should go back to
   const [photoUrl, setPhotoUrl] = React.useState(null);
   const [matches, setMatches] = React.useState([]);
   const [activePlant, setActivePlant] = React.useState(null);
@@ -1582,12 +1770,12 @@ function FloraApp() {
     // Accept either a ResultsScreen match {plant, conf} or a Journal entry {plant, photoUrl, ...}
     setActivePlant(matchOrEntry.plant);
     if (matchOrEntry.photoUrl) setPhotoUrl(matchOrEntry.photoUrl);
+    setDetailReturn(screen); // remember where we came from
     setScreen('detail');
   };
 
   const backFromDetail = () => {
-    // If we came from journal, go back to journal. Else results.
-    setScreen(matches.length ? 'results' : 'journal');
+    setScreen(detailReturn || 'home');
   };
 
   return (
@@ -1596,6 +1784,7 @@ function FloraApp() {
         <HomeScreen
           onCapture={startScan}
           onOpenJournal={() => setScreen('journal')}
+          onSelectPlant={(plant) => openDetail({ plant, photoUrl: plant.photoUrl || null })}
           recentCount={recentCount}
         />
       )}

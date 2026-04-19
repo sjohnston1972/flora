@@ -114,5 +114,18 @@ else
   die "Custom domain binding failed"
 fi
 
+# ─── 6. PURGE EDGE CACHE ─────────────────────────────────────────────
+say "Purging zone cache"
+PURGE_RESP=$(curl -s -X POST "${AUTH[@]}" \
+  -H "Content-Type: application/json" \
+  "${API}/zones/${ZONE_ID}/purge_cache" \
+  --data '{"purge_everything":true}')
+if echo "${PURGE_RESP}" | grep -qE '"success":\s*true'; then
+  ok "Cache purged"
+else
+  echo "${PURGE_RESP}" >&2
+  echo "(non-fatal — new deploys may take up to a minute to propagate)" >&2
+fi
+
 echo ""
 ok "Flora deployed → https://${HOSTNAME}"
