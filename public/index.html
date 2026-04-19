@@ -846,7 +846,7 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
               <strong>Camera debug</strong>
               <button onClick={() => setDebugOpen(false)} style={{ color: '#fff', fontSize: 14, fontWeight: 700, padding: '0 6px' }}>×</button>
             </div>
-            <div style={{ opacity: 0.7, marginBottom: 4 }}>Active: {debugInfo?.label || '(unnamed)'}</div>
+            <div style={{ opacity: 0.7, marginBottom: 4 }}>Active: [{activeCameraIdx}] camera {activeCameraIdx}</div>
             {debugInfo?.settings && (
               <div>
                 res: {debugInfo.settings.width}×{debugInfo.settings.height}
@@ -867,7 +867,7 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
                 background: i === activeCameraIdx ? 'rgba(168,215,140,0.25)' : 'transparent',
                 cursor: 'pointer',
               }}>
-                {i === activeCameraIdx ? '→ ' : '  '}[{i}] {c.label || '(unnamed device)'}
+                {i === activeCameraIdx ? '→ ' : '  '}[{i}] camera {i}
               </div>
             ))}
           </div>
