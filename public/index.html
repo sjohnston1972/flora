@@ -443,23 +443,23 @@ function NearbyCard({ plant, onClick }) {
     : plant.photo;
   return (
     <div onClick={onClick} style={{
-      flexShrink: 0, width: 150, height: 220, borderRadius: THEME.radiusSm,
+      flexShrink: 0, width: 130, height: 170, borderRadius: THEME.radiusSm,
       background: bg, color: '#fff', position: 'relative',
       overflow: 'hidden', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
-      padding: 12, cursor: onClick ? 'pointer' : 'default',
+      padding: 10, cursor: onClick ? 'pointer' : 'default',
     }}>
       <div style={{
         position: 'absolute', inset: 0,
-        background: 'linear-gradient(180deg, transparent 40%, rgba(0,0,0,0.65))',
+        background: 'linear-gradient(180deg, transparent 45%, rgba(0,0,0,0.7))',
       }} />
       <div style={{ position: 'relative', zIndex: 1 }}>
         {plant.toxicity?.level && plant.toxicity.level !== 'unknown' && (
           <ToxBadge tox={plant.toxicity.level} small />
         )}
-        <div style={{ fontFamily: FONTS.heading, fontSize: 20, fontWeight: 600, marginTop: 6, lineHeight: 1.05 }}>
+        <div style={{ fontFamily: FONTS.heading, fontSize: 17, fontWeight: 600, marginTop: 4, lineHeight: 1.05 }}>
           {plant.common}
         </div>
-        <div style={{ fontSize: 11, opacity: 0.85, fontStyle: 'italic' }}>{plant.name}</div>
+        <div style={{ fontSize: 10, opacity: 0.85, fontStyle: 'italic', lineHeight: 1.15 }}>{plant.name}</div>
       </div>
     </div>
   );
@@ -556,10 +556,70 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
   const [focusPoint, setFocusPoint] = React.useState({ x: 50, y: 50 });
   const [capturing, setCapturing] = React.useState(false);
   const [sheetOpen, setSheetOpen] = React.useState(false);
+  const [dragDelta, setDragDelta] = React.useState(0);
+  const dragStartY = React.useRef(null);
   const [nearby, setNearby] = React.useState(null); // null = loading, [] = empty/denied, [...] = data
   const [nearbyErr, setNearbyErr] = React.useState(null);
   const fileRef = React.useRef(null);
   const recentJournal = React.useMemo(() => loadJournal().slice(0, 3), [sheetOpen]);
+
+  const onHandleTouchStart = (e) => {
+    dragStartY.current = e.touches[0].clientY;
+  };
+  const onHandleTouchMove = (e) => {
+    if (dragStartY.current == null) return;
+    e.preventDefault();
+    setDragDelta(dragStartY.current - e.touches[0].clientY);
+  };
+  const onHandleTouchEnd = () => {
+    if (dragStartY.current == null) return;
+    dragStartY.current = null;
+    const THRESH = 50;
+    if (dragDelta > THRESH) setSheetOpen(true);
+    else if (dragDelta < -THRESH) setSheetOpen(false);
+    setDragDelta(0);
+  };
+
+  const baseHeightPct = sheetOpen ? 78 : 48;
+  const viewportH = typeof window !== 'undefined' ? window.innerHeight : 800;
+  const liveHeightPct = Math.max(30, Math.min(92, baseHeightPct + (dragDelta / viewportH) * 100));
+
+  // ── Live camera feed ───────────────────────────────
+  const videoRef = React.useRef(null);
+  const streamRef = React.useRef(null);
+  const [cameraReady, setCameraReady] = React.useState(false);
+  const [cameraErr, setCameraErr] = React.useState(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error('Camera API not available');
+        }
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          audio: false,
+        });
+        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch(() => {});
+        }
+        setCameraReady(true);
+      } catch (e) {
+        if (!cancelled) setCameraErr(e.message || 'Camera unavailable');
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop());
+        streamRef.current = null;
+      }
+    };
+  }, []);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -583,8 +643,30 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
     });
   };
 
-  const triggerCapture = () => {
+  const triggerCapture = async () => {
     if (capturing) return;
+    // Prefer grabbing a frame from the live stream
+    const video = videoRef.current;
+    if (streamRef.current && video && video.videoWidth > 0) {
+      setCapturing(true);
+      try {
+        const canvas = document.createElement('canvas');
+        const maxDim = 1568;
+        const scale = Math.min(1, maxDim / Math.max(video.videoWidth, video.videoHeight));
+        canvas.width = Math.round(video.videoWidth * scale);
+        canvas.height = Math.round(video.videoHeight * scale);
+        canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+        // Brief visual pause so the capture button animation reads
+        setTimeout(() => onCapture(dataUrl), 220);
+      } catch (err) {
+        console.error('Canvas capture failed', err);
+        setCapturing(false);
+        alert('Capture failed. Try the file picker instead.');
+      }
+      return;
+    }
+    // Fallback: native file picker / camera intent
     fileRef.current?.click();
   };
 
@@ -616,12 +698,12 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
         style={{ position: 'absolute', width: 0, height: 0, opacity: 0 }}
       />
 
-      {/* Viewfinder */}
+      {/* Viewfinder — live camera feed, with gradient fallback */}
       <div
         onClick={handleViewfinderTap}
         style={{
           position: 'absolute', top: 0, left: 0, right: 0,
-          height: '62%',
+          height: '52%',
           background: `
             radial-gradient(ellipse at 30% 20%, ${THEME.accentGlow}66 0%, transparent 45%),
             radial-gradient(ellipse at 70% 60%, ${THEME.accent}88 0%, transparent 50%),
@@ -630,6 +712,17 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
           overflow: 'hidden',
         }}
       >
+        {/* Live video feed — fades in when ready, covers the gradient */}
+        <video
+          ref={videoRef}
+          autoPlay playsInline muted
+          style={{
+            position: 'absolute', inset: 0, width: '100%', height: '100%',
+            objectFit: 'cover',
+            opacity: cameraReady ? 1 : 0,
+            transition: 'opacity 400ms ease-out',
+          }}
+        />
 
         <FocusReticle x={focusPoint.x} y={focusPoint.y} capturing={capturing} />
 
@@ -648,46 +741,55 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
           </GlassChip>
         </div>
 
-        {/* Coaching text */}
+        {/* Coaching text — adapts to camera state */}
         <div style={{
           position: 'absolute', top: `calc(70px + env(safe-area-inset-top))`, left: 0, right: 0,
           textAlign: 'center', pointerEvents: 'none', zIndex: 5,
         }}>
           <div style={{
             display: 'inline-block',
-            background: 'rgba(0,0,0,0.25)', backdropFilter: 'blur(10px)',
+            background: 'rgba(0,0,0,0.35)', backdropFilter: 'blur(10px)',
             WebkitBackdropFilter: 'blur(10px)',
             color: '#fff', padding: '6px 14px', borderRadius: 999,
             fontSize: 12, fontWeight: 500, letterSpacing: 0.2,
           }}>
-            🌿 Frame the leaf • tap to focus
+            {cameraErr
+              ? '📸 Tap the button to pick a photo'
+              : cameraReady
+                ? '🌿 Frame the plant · tap the leaf to capture'
+                : '🌿 Starting camera…'}
           </div>
         </div>
       </div>
 
-      {/* Lower panel */}
+      {/* Lower panel — drag handle up/down or tap to toggle */}
       <div style={{
         position: 'absolute', bottom: 0, left: 0, right: 0,
-        height: sheetOpen ? '78%' : '42%',
+        height: `${liveHeightPct}%`,
         background: THEME.bg,
         borderTopLeftRadius: THEME.radius + 8,
         borderTopRightRadius: THEME.radius + 8,
-        transition: 'height 380ms cubic-bezier(0.34, 1.3, 0.4, 1)',
+        transition: dragStartY.current == null ? 'height 320ms cubic-bezier(0.34, 1.3, 0.4, 1)' : 'none',
         boxShadow: '0 -8px 30px rgba(0,0,0,0.08)',
         display: 'flex', flexDirection: 'column',
       }}>
         <button
           onClick={() => setSheetOpen(!sheetOpen)}
+          onTouchStart={onHandleTouchStart}
+          onTouchMove={onHandleTouchMove}
+          onTouchEnd={onHandleTouchEnd}
+          onTouchCancel={onHandleTouchEnd}
           aria-label={sheetOpen ? 'Collapse panel' : 'Expand panel'}
           style={{
-            padding: '16px 0 10px', width: '100%',
-            display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 6,
-            cursor: 'pointer', background: 'transparent',
+            padding: '14px 0 8px', width: '100%',
+            display: 'flex', justifyContent: 'center', alignItems: 'center',
+            cursor: 'grab', background: 'transparent',
+            touchAction: 'none',
           }}
         >
           <div style={{
             width: 56, height: 5, borderRadius: 3,
-            background: THEME.inkMuted, opacity: sheetOpen ? 0.5 : 0.3,
+            background: THEME.inkMuted, opacity: sheetOpen ? 0.55 : 0.35,
             transition: 'opacity 200ms',
           }} />
         </button>
