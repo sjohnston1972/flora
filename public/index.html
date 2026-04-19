@@ -598,7 +598,7 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
           throw new Error('Camera API not available');
         }
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          video: { facingMode: { ideal: 'environment' } },
           audio: false,
         });
         if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
@@ -712,13 +712,14 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
           overflow: 'hidden',
         }}
       >
-        {/* Live video feed — fades in when ready, covers the gradient */}
+        {/* Live video feed — fades in when ready, full frame (WYSIWYG) with
+            gradient bleeding through the letterbox areas. */}
         <video
           ref={videoRef}
           autoPlay playsInline muted
           style={{
             position: 'absolute', inset: 0, width: '100%', height: '100%',
-            objectFit: 'cover',
+            objectFit: 'contain',
             opacity: cameraReady ? 1 : 0,
             transition: 'opacity 400ms ease-out',
           }}
