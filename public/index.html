@@ -598,7 +598,13 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
           throw new Error('Camera API not available');
         }
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' } },
+          video: {
+            facingMode: { ideal: 'environment' },
+            // Moderate resolution — high enough for plant ID, avoids forcing
+            // the browser to pick a telephoto sensor on multi-camera phones.
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
           audio: false,
         });
         if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
@@ -606,6 +612,32 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           videoRef.current.play().catch(() => {});
+        }
+
+        // Try to force zoom back to 1x and enable continuous autofocus.
+        // Both are behind browser capability flags — silently skip if unsupported.
+        const track = stream.getVideoTracks()[0];
+        try {
+          const caps = track.getCapabilities ? track.getCapabilities() : {};
+          const advanced = [];
+          if (caps.focusMode && caps.focusMode.includes('continuous')) {
+            advanced.push({ focusMode: 'continuous' });
+          }
+          if (caps.zoom) {
+            advanced.push({ zoom: caps.zoom.min ?? 1 });
+          }
+          if (caps.whiteBalanceMode && caps.whiteBalanceMode.includes('continuous')) {
+            advanced.push({ whiteBalanceMode: 'continuous' });
+          }
+          if (caps.exposureMode && caps.exposureMode.includes('continuous')) {
+            advanced.push({ exposureMode: 'continuous' });
+          }
+          if (advanced.length) {
+            await track.applyConstraints({ advanced });
+          }
+          console.info('[flora] camera caps', caps, 'settings', track.getSettings?.());
+        } catch (e) {
+          console.warn('[flora] camera constraint tuning failed', e);
         }
         setCameraReady(true);
       } catch (e) {
@@ -635,12 +667,29 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
     return () => { cancelled = true; };
   }, []);
 
-  const handleViewfinderTap = (e) => {
+  const handleViewfinderTap = async (e) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    setFocusPoint({
-      x: ((e.clientX - rect.left) / rect.width) * 100,
-      y: ((e.clientY - rect.top) / rect.height) * 100,
-    });
+    const nx = (e.clientX - rect.left) / rect.width;
+    const ny = (e.clientY - rect.top) / rect.height;
+    setFocusPoint({ x: nx * 100, y: ny * 100 });
+
+    // Try to drive the camera to focus at the tapped point
+    const stream = streamRef.current;
+    if (!stream) return;
+    const track = stream.getVideoTracks()[0];
+    try {
+      const caps = track.getCapabilities?.();
+      const advanced = [];
+      if (caps?.pointsOfInterest) advanced.push({ pointsOfInterest: [{ x: nx, y: ny }] });
+      if (caps?.focusMode?.includes('single-shot')) advanced.push({ focusMode: 'single-shot' });
+      if (advanced.length) await track.applyConstraints({ advanced });
+      // Nudge back to continuous after a couple seconds so it can re-track
+      if (caps?.focusMode?.includes('continuous')) {
+        setTimeout(() => {
+          track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
+        }, 2500);
+      }
+    } catch {} // silent — tap-to-focus is best-effort
   };
 
   const triggerCapture = async () => {
