@@ -1,0 +1,1640 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+<meta name="theme-color" content="#ECF3E5" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="description" content="Flora — a pocket botanist. Identify plants from a photo." />
+<title>Flora — a pocket botanist</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Nunito+Sans:wght@400;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    overscroll-behavior: none;
+  }
+  body {
+    background: #ECF3E5;
+    font-family: 'Nunito Sans', 'Inter', system-ui, sans-serif;
+    color: #1F2B1A;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  #root { width: 100%; height: 100%; position: relative; }
+  button { font-family: inherit; border: none; background: none; padding: 0; cursor: pointer; }
+  input, textarea { font-family: inherit; }
+  @keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
+  @keyframes radarPulse { 0% { transform: scale(0.2); opacity: 0.9; } 100% { transform: scale(1); opacity: 0; } }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes slideUp { from { transform: translateY(12px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+  /* Hide scrollbars but keep functionality */
+  ::-webkit-scrollbar { width: 0; height: 0; }
+</style>
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- ============================================================
+     THEME — Mossy palette + Botanical font pairing (locked)
+     ============================================================ -->
+<script type="text/babel">
+const THEME = {
+  name: 'Mossy',
+  bg: '#ECF3E5',
+  bgDeep: '#E2EDD4',
+  surface: '#FFFFFF',
+  surfaceAlt: '#F5F9EE',
+  ink: '#1F2B1A',
+  inkMuted: '#5A6B4E',
+  accent: '#4A7C3A',
+  accentDeep: '#2D5420',
+  accentSoft: '#C4DAA8',
+  accentGlow: '#A8D78C',
+  warm: '#E89A4E',
+  danger: '#C95D5D',
+  radius: 28,
+  radiusSm: 18,
+  radiusTight: 12,
+  shadow: '0 8px 24px rgba(45,84,32,0.08), 0 2px 6px rgba(45,84,32,0.04)',
+  shadowLg: '0 20px 50px rgba(45,84,32,0.14)',
+};
+
+const FONTS = {
+  heading: "'Cormorant Garamond', Georgia, serif",
+  body: "'Nunito Sans', -apple-system, system-ui, sans-serif",
+  mono: "'JetBrains Mono', ui-monospace, monospace",
+};
+</script>
+
+<!-- ============================================================
+     DATA — Seed plants (used for nearby + similar; real IDs come from API)
+     ============================================================ -->
+<script type="text/babel">
+const PLANTS = [
+  {
+    id: 'monstera',
+    name: 'Monstera deliciosa',
+    common: 'Swiss Cheese Plant',
+    family: 'Araceae',
+    confidence: 0.96,
+    colors: ['#2d5a3d', '#4a7c5a', '#8cb89a'],
+    photo: 'linear-gradient(135deg, #1f3a28 0%, #2d5a3d 35%, #4a7c5a 70%, #8cb89a 100%)',
+    leafShape: 'fenestrated',
+    tagline: 'Native rainforest climber. Holes develop with maturity.',
+    native: 'Southern Mexico → Panama',
+    habitat: 'Tropical understory',
+    bloom: { months: [5, 6, 7], label: 'Late spring – midsummer' },
+    toxicity: { level: 'toxic', note: 'Calcium oxalate crystals. Keep from pets & kids.' },
+    edibility: 'Ripe fruit only — unripe contains oxalates.',
+    care: { light: 'Bright indirect', water: 'When top 5cm dry', humidity: 'High (60%+)', temp: '18–27°C' },
+    similar: ['philodendron', 'rhaphidophora'],
+    nearby: 12,
+    tags: ['Climber', 'Aroid', 'Houseplant'],
+  },
+  {
+    id: 'lavender',
+    name: 'Lavandula angustifolia',
+    common: 'English Lavender',
+    family: 'Lamiaceae',
+    confidence: 0.92,
+    colors: ['#6d5a8a', '#9181b8', '#c9bde0'],
+    photo: 'linear-gradient(160deg, #3d3258 0%, #6d5a8a 40%, #9181b8 75%, #d9c9a8 100%)',
+    leafShape: 'linear',
+    tagline: 'Aromatic Mediterranean shrub beloved by bees.',
+    native: 'Mediterranean basin',
+    habitat: 'Dry rocky slopes, full sun',
+    bloom: { months: [6, 7, 8], label: 'June – August' },
+    toxicity: { level: 'safe', note: 'Non-toxic to humans, cats, dogs.' },
+    edibility: 'Flowers edible — culinary & tea use.',
+    care: { light: 'Full sun', water: 'Drought tolerant', humidity: 'Low', temp: '15–30°C' },
+    similar: ['rosemary', 'thyme'],
+    nearby: 47,
+    tags: ['Herb', 'Pollinator', 'Fragrant'],
+  },
+  {
+    id: 'fern',
+    name: 'Nephrolepis exaltata',
+    common: 'Boston Fern',
+    family: 'Nephrolepidaceae',
+    confidence: 0.89,
+    colors: ['#2b4a2b', '#4a7c4a', '#a0c090'],
+    photo: 'linear-gradient(180deg, #1a2e1a 0%, #2b4a2b 40%, #4a7c4a 80%, #a0c090 100%)',
+    leafShape: 'pinnate',
+    tagline: 'Arching fronds purify air. Loves humidity.',
+    native: 'Humid forests worldwide',
+    habitat: 'Moist shade, tropical',
+    bloom: { months: [], label: 'Non-flowering (spore-bearing)' },
+    toxicity: { level: 'safe', note: 'Pet-friendly. Safe for cats & dogs.' },
+    edibility: 'Fiddleheads historically eaten, not recommended.',
+    care: { light: 'Indirect', water: 'Keep moist', humidity: 'Very high', temp: '18–24°C' },
+    similar: ['maidenhair', 'staghorn'],
+    nearby: 8,
+    tags: ['Fern', 'Air-purifying', 'Pet-safe'],
+  },
+  {
+    id: 'oleander',
+    name: 'Nerium oleander',
+    common: 'Oleander',
+    family: 'Apocynaceae',
+    confidence: 0.94,
+    colors: ['#a83d5a', '#d46880', '#f0b0c0'],
+    photo: 'linear-gradient(140deg, #5a1f30 0%, #a83d5a 40%, #d46880 75%, #2d5a3d 100%)',
+    leafShape: 'lanceolate',
+    tagline: 'Evergreen shrub with striking blooms — highly toxic.',
+    native: 'Mediterranean & SW Asia',
+    habitat: 'Dry streambeds, coastal',
+    bloom: { months: [5, 6, 7, 8, 9], label: 'May – September' },
+    toxicity: { level: 'severe', note: 'All parts highly toxic. Do not touch or ingest.' },
+    edibility: 'Deadly. Never consume.',
+    care: { light: 'Full sun', water: 'Drought tolerant', humidity: 'Low', temp: '10–35°C' },
+    similar: ['rhododendron'],
+    nearby: 3,
+    tags: ['Toxic', 'Flowering', 'Evergreen'],
+  },
+];
+
+const plantById = (id) => PLANTS.find(p => p.id === id);
+
+const LEAF_SHAPES = ['fenestrated', 'linear', 'pinnate', 'lanceolate'];
+const pickLeafShape = (name = '') => {
+  const n = name.toLowerCase();
+  if (/monstera|philodendron|aroid/.test(n)) return 'fenestrated';
+  if (/lavender|grass|reed|iris/.test(n)) return 'linear';
+  if (/fern|palm|cycad/.test(n)) return 'pinnate';
+  return 'lanceolate';
+};
+const pickColors = (tox) => {
+  if (tox === 'severe') return ['#a83d5a', '#d46880', '#f0b0c0'];
+  if (tox === 'toxic')  return ['#8a5a2b', '#b88a4f', '#e0c49a'];
+  return ['#2d5a3d', '#4a7c5a', '#8cb89a'];
+};
+</script>
+
+<!-- ============================================================
+     ICONS
+     ============================================================ -->
+<script type="text/babel">
+const Icon = ({ d, size = 20, stroke = 'currentColor', fill = 'none', sw = 1.8, style }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill={fill} stroke={stroke} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round" style={style}>
+    <path d={d} />
+  </svg>
+);
+
+const IconLeaf = (p) => <Icon {...p} d="M11 20A7 7 0 014 13V5h8a7 7 0 017 7v1a7 7 0 01-7 7zM4 5l16 16" />;
+const IconFlash = (p) => <Icon {...p} d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />;
+const IconBook = (p) => <Icon {...p} d="M4 19.5A2.5 2.5 0 016.5 17H20M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z" />;
+const IconMap = (p) => <Icon {...p} d="M3 6l6-3 6 3 6-3v15l-6 3-6-3-6 3zM9 3v15M15 6v15" />;
+const IconPaw = (p) => <Icon {...p} d="M12 13c-2.5 0-4.5 2-4.5 4.5 0 1.4 1.1 2.5 2.5 2.5 1.5 0 2-1 2-1s.5 1 2 1c1.4 0 2.5-1.1 2.5-2.5C16.5 15 14.5 13 12 13zM5.5 10.5a2 2 0 11-4 0 2 2 0 014 0zM22.5 10.5a2 2 0 11-4 0 2 2 0 014 0zM9.5 6.5a2 2 0 11-4 0 2 2 0 014 0zM18.5 6.5a2 2 0 11-4 0 2 2 0 014 0z" fill="currentColor" stroke="none" />;
+const IconDrop = (p) => <Icon {...p} d="M12 2s-7 8-7 13a7 7 0 0014 0c0-5-7-13-7-13z" />;
+const IconSun = (p) => <Icon {...p} d="M12 3v2M12 19v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M3 12h2M19 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4M12 17a5 5 0 100-10 5 5 0 000 10z" />;
+const IconThermo = (p) => <Icon {...p} d="M14 15V5a2 2 0 10-4 0v10a4 4 0 104 0z" />;
+const IconBloom = (p) => <Icon {...p} d="M12 8a4 4 0 100 8 4 4 0 000-8zM12 8V4M12 20v-4M8 12H4M20 12h-4M6.3 6.3l2.8 2.8M14.9 14.9l2.8 2.8M6.3 17.7l2.8-2.8M14.9 9.1l2.8-2.8" />;
+const IconBack = (p) => <Icon {...p} d="M19 12H5M12 19l-7-7 7-7" />;
+const IconPin = (p) => <Icon {...p} d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0zM12 13a3 3 0 100-6 3 3 0 000 6z" />;
+const IconBookmark = (p) => <Icon {...p} d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z" />;
+const IconPlus = (p) => <Icon {...p} d="M12 5v14M5 12h14" />;
+const IconChevR = (p) => <Icon {...p} d="M9 18l6-6-6-6" />;
+</script>
+
+<!-- ============================================================
+     FLORA IMAGE — SVG illustration or real photo
+     ============================================================ -->
+<script type="text/babel">
+function FloraImage({ plant, size = 200, style = {}, rounded = 24, photoUrl }) {
+  // If a real photo exists, show it.
+  if (photoUrl) {
+    return (
+      <div style={{
+        width: size, height: size, borderRadius: rounded, overflow: 'hidden',
+        background: `#000 center/cover url(${photoUrl})`, position: 'relative',
+        ...style,
+      }} />
+    );
+  }
+
+  const { leafShape, colors, id } = plant;
+  const [a, b, c] = colors;
+
+  const renderShape = () => {
+    switch (leafShape) {
+      case 'fenestrated':
+        return (
+          <g>
+            <path d="M50 80 Q 20 50 30 20 Q 60 5 90 15 Q 130 30 140 70 Q 150 130 120 160 Q 85 180 55 160 Q 25 140 50 80 Z" fill={b} />
+            <ellipse cx="70" cy="60" rx="8" ry="15" fill={a} opacity="0.55" />
+            <ellipse cx="95" cy="80" rx="10" ry="18" fill={a} opacity="0.55" />
+            <ellipse cx="75" cy="110" rx="9" ry="14" fill={a} opacity="0.55" />
+            <ellipse cx="105" cy="130" rx="7" ry="12" fill={a} opacity="0.55" />
+            <path d="M85 20 L 85 170" stroke={a} strokeWidth="2" opacity="0.6" />
+          </g>
+        );
+      case 'linear':
+        return (
+          <g>
+            {[0, 1, 2].map(i => (
+              <g key={i} transform={`translate(${50 + i * 30}, 30) rotate(${-10 + i * 10})`}>
+                <rect x="0" y="40" width="3" height="100" fill={a} />
+                {[0, 1, 2, 3, 4, 5].map(j => (
+                  <ellipse key={j} cx="1.5" cy={40 + j * 8} rx="7" ry="5" fill={b} opacity={0.85 - j * 0.08} />
+                ))}
+              </g>
+            ))}
+          </g>
+        );
+      case 'pinnate':
+        return (
+          <g transform="translate(100, 20)">
+            <path d="M0 0 Q -5 80 0 160" stroke={a} strokeWidth="2.5" fill="none" />
+            {Array.from({ length: 12 }).map((_, i) => {
+              const y = 10 + i * 12;
+              const w = 35 - Math.abs(i - 5) * 3;
+              return (
+                <g key={i}>
+                  <ellipse cx={-w / 2 - 5} cy={y} rx={w / 2} ry="4" fill={b} />
+                  <ellipse cx={w / 2 + 5} cy={y} rx={w / 2} ry="4" fill={b} />
+                </g>
+              );
+            })}
+          </g>
+        );
+      case 'lanceolate':
+        return (
+          <g>
+            <path d="M60 40 Q 40 100 70 160" stroke={c} strokeWidth="2" fill="none" />
+            <ellipse cx="50" cy="60" rx="8" ry="30" transform="rotate(-25 50 60)" fill={c} />
+            <ellipse cx="55" cy="110" rx="8" ry="30" transform="rotate(-10 55 110)" fill={c} />
+            <ellipse cx="75" cy="145" rx="8" ry="30" transform="rotate(20 75 145)" fill={c} />
+            {[[110, 50], [130, 80], [120, 120]].map(([cx, cy], i) => (
+              <g key={i} transform={`translate(${cx} ${cy})`}>
+                {[0, 72, 144, 216, 288].map(deg => (
+                  <ellipse key={deg} cx="0" cy="-12" rx="7" ry="11" fill={b} transform={`rotate(${deg})`} />
+                ))}
+                <circle r="4" fill={a} />
+              </g>
+            ))}
+          </g>
+        );
+      default:
+        return <circle cx="100" cy="100" r="70" fill={b} />;
+    }
+  };
+
+  return (
+    <div style={{
+      width: size, height: size, borderRadius: rounded, overflow: 'hidden',
+      background: plant.photo, position: 'relative', ...style,
+    }}>
+      <svg viewBox="0 0 200 200" width="100%" height="100%" style={{ display: 'block' }}>
+        <defs>
+          <radialGradient id={`glow-${id}`}>
+            <stop offset="0%" stopColor="#fff" stopOpacity="0.15" />
+            <stop offset="100%" stopColor="#fff" stopOpacity="0" />
+          </radialGradient>
+        </defs>
+        <circle cx="60" cy="50" r="80" fill={`url(#glow-${id})`} />
+        {renderShape()}
+      </svg>
+    </div>
+  );
+}
+</script>
+
+<!-- ============================================================
+     SHARED UI — ToxBadge, GlassChip, NearbyCard, JournalRow, FactCell, etc
+     ============================================================ -->
+<script type="text/babel">
+function ToxBadge({ tox, small }) {
+  const map = {
+    safe:   { bg: '#3a7a3a', label: 'Pet safe', icon: '🐾' },
+    toxic:  { bg: '#d47a2a', label: 'Toxic',    icon: '⚠' },
+    severe: { bg: '#c94a3a', label: 'Severe',   icon: '☠' },
+    unknown:{ bg: '#6B6655', label: 'Unknown',  icon: '?' },
+  };
+  const m = map[tox] || map.unknown;
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 4,
+      background: m.bg, color: '#fff',
+      padding: small ? '2px 7px' : '4px 9px', borderRadius: 999,
+      fontSize: small ? 10 : 11, fontWeight: 600,
+    }}>{m.icon} {m.label}</span>
+  );
+}
+
+function GlassChip({ children, onClick }) {
+  return (
+    <button onClick={onClick} style={{
+      display: 'flex', alignItems: 'center', gap: 6,
+      padding: '8px 14px', borderRadius: 999,
+      background: 'rgba(255,255,255,0.75)',
+      backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)',
+      border: '1px solid rgba(255,255,255,0.4)',
+      cursor: 'pointer',
+    }}>{children}</button>
+  );
+}
+
+function NearbyCard({ plant }) {
+  // Immersive (tall) layout — locked default from TWEAKS_DEFAULTS
+  return (
+    <div style={{
+      flexShrink: 0, width: 150, height: 220, borderRadius: THEME.radiusSm,
+      background: plant.photo, color: '#fff', position: 'relative',
+      overflow: 'hidden', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end',
+      padding: 12,
+    }}>
+      <div style={{
+        position: 'absolute', inset: 0,
+        background: 'linear-gradient(180deg, transparent 40%, rgba(0,0,0,0.65))',
+      }} />
+      <div style={{ position: 'relative', zIndex: 1 }}>
+        <ToxBadge tox={plant.toxicity.level} small />
+        <div style={{ fontFamily: FONTS.heading, fontSize: 20, fontWeight: 600, marginTop: 6, lineHeight: 1.05 }}>
+          {plant.common}
+        </div>
+        <div style={{ fontSize: 11, opacity: 0.85, fontStyle: 'italic' }}>{plant.name}</div>
+      </div>
+    </div>
+  );
+}
+
+function JournalRow({ entry }) {
+  const plant = entry.plant || plantById(entry.plantId);
+  if (!plant) return null;
+  return (
+    <div style={{
+      display: 'flex', gap: 12, padding: '10px 0',
+      borderBottom: `1px solid ${THEME.accentSoft}55`,
+    }}>
+      <FloraImage plant={plant} size={48} rounded={THEME.radiusTight} photoUrl={entry.photoUrl} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+          <div style={{ fontFamily: FONTS.heading, fontSize: 18, fontWeight: 500 }}>
+            {plant.common}
+          </div>
+          <div style={{ fontSize: 11, color: THEME.inkMuted }}>{entry.date}</div>
+        </div>
+        <div style={{ fontSize: 12, color: THEME.inkMuted, marginTop: 2 }}>
+          {entry.location}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FactCell({ icon, label, value }) {
+  return (
+    <div style={{
+      background: THEME.surface, borderRadius: THEME.radiusSm,
+      padding: 12, boxShadow: THEME.shadow,
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 6,
+        fontSize: 11, color: THEME.inkMuted, fontWeight: 600,
+        textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6,
+      }}>
+        {icon} {label}
+      </div>
+      <div>{value}</div>
+    </div>
+  );
+}
+
+// Shrink an image to max 1568px on the long edge (Claude Vision's sweet spot) and return a JPEG data URL.
+async function shrinkImage(file, maxDim = 1568, quality = 0.85) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = rej;
+      i.src = url;
+    });
+    const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+    const w = Math.round(img.width * scale);
+    const h = Math.round(img.height * scale);
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(img, 0, 0, w, h);
+    return c.toDataURL('image/jpeg', quality);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+// Journal persistence
+const JOURNAL_KEY = 'flora:journal:v1';
+function loadJournal() {
+  try { return JSON.parse(localStorage.getItem(JOURNAL_KEY) || '[]'); }
+  catch { return []; }
+}
+function saveJournal(entries) {
+  try { localStorage.setItem(JOURNAL_KEY, JSON.stringify(entries)); } catch {}
+}
+function addJournalEntry(entry) {
+  const entries = loadJournal();
+  entries.unshift({ ...entry, id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6) });
+  // Cap at 50 to keep localStorage small
+  saveJournal(entries.slice(0, 50));
+  return entries;
+}
+</script>
+
+<!-- ============================================================
+     SCREEN — HOME (camera capture)
+     ============================================================ -->
+<script type="text/babel">
+function HomeScreen({ onCapture, onOpenJournal, recentCount }) {
+  const [focusPoint, setFocusPoint] = React.useState({ x: 50, y: 50 });
+  const [capturing, setCapturing] = React.useState(false);
+  const [sheetOpen, setSheetOpen] = React.useState(false);
+  const fileRef = React.useRef(null);
+  const recentJournal = React.useMemo(() => loadJournal().slice(0, 3), [sheetOpen]);
+
+  const handleViewfinderTap = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    setFocusPoint({
+      x: ((e.clientX - rect.left) / rect.width) * 100,
+      y: ((e.clientY - rect.top) / rect.height) * 100,
+    });
+  };
+
+  const triggerCapture = () => {
+    if (capturing) return;
+    fileRef.current?.click();
+  };
+
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow reselect same file
+    if (!file) return;
+    setCapturing(true);
+    try {
+      const dataUrl = await shrinkImage(file);
+      onCapture(dataUrl);
+    } catch (err) {
+      console.error('image processing failed', err);
+      setCapturing(false);
+      alert('Could not read that image. Try another.');
+    }
+  };
+
+  return (
+    <div style={{
+      position: 'relative', width: '100%', height: '100%',
+      background: THEME.bg, color: THEME.ink,
+      fontFamily: FONTS.body, overflow: 'hidden',
+    }}>
+      {/* hidden capture input */}
+      <input
+        ref={fileRef} type="file" accept="image/*" capture="environment"
+        onChange={handleFile}
+        style={{ position: 'absolute', width: 0, height: 0, opacity: 0 }}
+      />
+
+      {/* Viewfinder */}
+      <div
+        onClick={handleViewfinderTap}
+        style={{
+          position: 'absolute', top: 0, left: 0, right: 0,
+          height: '62%',
+          background: `
+            radial-gradient(ellipse at 30% 20%, ${THEME.accentGlow}66 0%, transparent 45%),
+            radial-gradient(ellipse at 70% 60%, ${THEME.accent}88 0%, transparent 50%),
+            linear-gradient(160deg, ${THEME.accentDeep} 0%, ${THEME.accent} 50%, ${THEME.accentGlow} 100%)
+          `,
+          overflow: 'hidden',
+        }}
+      >
+        <svg width="100%" height="100%" viewBox="0 0 400 600" preserveAspectRatio="xMidYMid slice" style={{ position: 'absolute', inset: 0 }}>
+          <defs><filter id="blur1"><feGaussianBlur stdDeviation="8" /></filter></defs>
+          <g filter="url(#blur1)" opacity="0.85">
+            <ellipse cx="80" cy="150" rx="120" ry="80" fill={THEME.accentDeep} />
+            <ellipse cx="320" cy="100" rx="100" ry="70" fill={THEME.accent} />
+            <ellipse cx="200" cy="400" rx="180" ry="100" fill={THEME.accentGlow} />
+            <ellipse cx="350" cy="500" rx="90" ry="60" fill={THEME.accent} />
+          </g>
+          <g transform="translate(140, 140)" opacity="0.95">
+            <path d="M60 0 Q 10 30 10 100 Q 10 170 60 200 Q 130 200 150 120 Q 150 30 100 10 Q 80 0 60 0 Z" fill={THEME.accentDeep} />
+            <ellipse cx="50" cy="60" rx="8" ry="18" fill={THEME.accent} opacity="0.8" />
+            <ellipse cx="80" cy="90" rx="10" ry="20" fill={THEME.accent} opacity="0.8" />
+            <ellipse cx="60" cy="130" rx="9" ry="17" fill={THEME.accent} opacity="0.8" />
+            <ellipse cx="100" cy="150" rx="8" ry="15" fill={THEME.accent} opacity="0.8" />
+          </g>
+        </svg>
+
+        <FocusReticle x={focusPoint.x} y={focusPoint.y} capturing={capturing} />
+
+        {/* Top overlay — safe-area respecting */}
+        <div style={{
+          position: 'absolute', top: `calc(16px + env(safe-area-inset-top))`, left: 0, right: 0,
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          padding: '0 16px', zIndex: 10,
+        }}>
+          <GlassChip onClick={onOpenJournal}>
+            <IconBook size={16} stroke={THEME.ink} />
+            <span style={{ fontSize: 13, fontWeight: 600, color: THEME.ink }}>Journal</span>
+          </GlassChip>
+          <GlassChip>
+            <IconFlash size={16} stroke={THEME.ink} />
+          </GlassChip>
+        </div>
+
+        {/* Coaching text */}
+        <div style={{
+          position: 'absolute', top: `calc(70px + env(safe-area-inset-top))`, left: 0, right: 0,
+          textAlign: 'center', pointerEvents: 'none', zIndex: 5,
+        }}>
+          <div style={{
+            display: 'inline-block',
+            background: 'rgba(0,0,0,0.25)', backdropFilter: 'blur(10px)',
+            WebkitBackdropFilter: 'blur(10px)',
+            color: '#fff', padding: '6px 14px', borderRadius: 999,
+            fontSize: 12, fontWeight: 500, letterSpacing: 0.2,
+          }}>
+            🌿 Frame the leaf • tap to focus
+          </div>
+        </div>
+      </div>
+
+      {/* Lower panel */}
+      <div style={{
+        position: 'absolute', bottom: 0, left: 0, right: 0,
+        height: sheetOpen ? '78%' : '42%',
+        background: THEME.bg,
+        borderTopLeftRadius: THEME.radius + 8,
+        borderTopRightRadius: THEME.radius + 8,
+        transition: 'height 380ms cubic-bezier(0.34, 1.3, 0.4, 1)',
+        boxShadow: '0 -8px 30px rgba(0,0,0,0.08)',
+        display: 'flex', flexDirection: 'column',
+      }}>
+        <div
+          onClick={() => setSheetOpen(!sheetOpen)}
+          style={{ padding: '10px 0 6px', display: 'flex', justifyContent: 'center', cursor: 'pointer' }}
+        >
+          <div style={{
+            width: 44, height: 5, borderRadius: 3,
+            background: THEME.inkMuted, opacity: 0.3,
+          }} />
+        </div>
+
+        {/* Capture controls */}
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          padding: '8px 28px 16px',
+        }}>
+          {/* Gallery thumb — shows most recent journal entry */}
+          <button onClick={onOpenJournal} style={{
+            width: 48, height: 48, borderRadius: THEME.radiusSm,
+            border: `2px solid ${THEME.accentSoft}`,
+            background: recentJournal[0]?.photoUrl
+              ? `center/cover url(${recentJournal[0].photoUrl})`
+              : `linear-gradient(135deg, ${PLANTS[0].colors[1]}, ${PLANTS[0].colors[2]})`,
+            cursor: 'pointer', position: 'relative', overflow: 'hidden',
+          }}>
+            {recentCount > 0 && (
+              <div style={{
+                position: 'absolute', bottom: 2, right: 2,
+                background: THEME.ink, color: THEME.bg, fontSize: 9, fontWeight: 700,
+                borderRadius: 999, padding: '2px 6px',
+              }}>{recentCount}</div>
+            )}
+          </button>
+
+          <button
+            onClick={triggerCapture}
+            style={{
+              width: 86, height: 86, borderRadius: '50%',
+              cursor: 'pointer', padding: 0,
+              background: 'transparent', position: 'relative',
+            }}
+          >
+            <svg width="86" height="86" viewBox="0 0 86 86" style={{ position: 'absolute', inset: 0 }}>
+              <circle cx="43" cy="43" r="40" fill="none" stroke={THEME.accentSoft} strokeWidth="2" />
+              <circle cx="43" cy="43" r="40" fill="none" stroke={THEME.accent} strokeWidth="2.5"
+                strokeDasharray="4 10" opacity={capturing ? 1 : 0.5}
+                style={{
+                  transformOrigin: '43px 43px',
+                  animation: capturing ? 'spin 0.6s linear infinite' : 'spin 8s linear infinite',
+                }} />
+            </svg>
+            <div style={{
+              position: 'absolute', inset: 10, borderRadius: '50%',
+              background: `radial-gradient(circle at 35% 30%, ${THEME.accentGlow}, ${THEME.accent} 65%, ${THEME.accentDeep})`,
+              boxShadow: capturing
+                ? `0 0 0 8px ${THEME.accentSoft}, inset 0 -6px 12px rgba(0,0,0,0.2)`
+                : `inset 0 -6px 12px rgba(0,0,0,0.2), 0 4px 16px ${THEME.accent}55`,
+              transform: capturing ? 'scale(0.88)' : 'scale(1)',
+              transition: 'all 200ms ease',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}>
+              <IconLeaf size={28} stroke="#fff" sw={2.2} />
+            </div>
+          </button>
+
+          <div style={{
+            width: 48, height: 48, borderRadius: THEME.radiusSm,
+            background: THEME.surface, boxShadow: THEME.shadow,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: 'pointer',
+          }}>
+            <IconMap size={20} stroke={THEME.ink} />
+          </div>
+        </div>
+
+        <div style={{
+          display: 'flex', justifyContent: 'center', gap: 24,
+          padding: '0 20px 14px', fontSize: 13, fontWeight: 600,
+          color: THEME.inkMuted,
+        }}>
+          <span>leaf</span>
+          <span style={{ color: THEME.accent }}>● whole plant</span>
+          <span>bark</span>
+          <span>flower</span>
+        </div>
+
+        <div style={{
+          flex: 1, overflow: 'hidden', padding: '4px 20px 20px',
+          display: 'flex', flexDirection: 'column', gap: 12,
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <h3 style={{
+              fontFamily: FONTS.heading, fontSize: 28, margin: 0,
+              fontWeight: 500, letterSpacing: -0.3,
+            }}>Near you today</h3>
+            <span style={{ fontSize: 12, color: THEME.inkMuted }}>42 species</span>
+          </div>
+          <div style={{
+            display: 'flex', gap: 10, overflowX: 'auto',
+            margin: '0 -20px', padding: '0 20px 4px',
+          }}>
+            {PLANTS.map(p => <NearbyCard key={p.id} plant={p} />)}
+          </div>
+          {sheetOpen && (
+            <div style={{ marginTop: 4 }}>
+              <div style={{
+                fontFamily: FONTS.heading, fontSize: 24, fontWeight: 500,
+                marginBottom: 6,
+              }}>Your recent journal</div>
+              {recentJournal.length === 0 ? (
+                <div style={{ fontSize: 13, color: THEME.inkMuted, padding: '12px 0' }}>
+                  No entries yet. Capture a plant to get started.
+                </div>
+              ) : (
+                recentJournal.map((j, i) => <JournalRow key={j.id || i} entry={j} />)
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FocusReticle({ x, y, capturing }) {
+  const s = capturing ? 140 : 110;
+  return (
+    <div style={{
+      position: 'absolute', left: `${x}%`, top: `${y}%`,
+      width: s, height: s, marginLeft: -s / 2, marginTop: -s / 2,
+      pointerEvents: 'none',
+      transition: 'all 300ms cubic-bezier(0.34, 1.5, 0.4, 1)',
+    }}>
+      <svg viewBox="0 0 100 100" width="100%" height="100%">
+        {[[6, 6], [94, 6], [6, 94], [94, 94]].map(([cx, cy], i) => {
+          const dx = cx < 50 ? 1 : -1;
+          const dy = cy < 50 ? 1 : -1;
+          return (
+            <g key={i}>
+              <line x1={cx} y1={cy} x2={cx + dx * 14} y2={cy} stroke="#fff" strokeWidth="2.5" strokeLinecap="round" />
+              <line x1={cx} y1={cy} x2={cx} y2={cy + dy * 14} stroke="#fff" strokeWidth="2.5" strokeLinecap="round" />
+            </g>
+          );
+        })}
+        <circle cx="50" cy="50" r="3" fill="#fff" opacity="0.9" />
+        <circle cx="50" cy="50" r="38" fill="none" stroke="#fff" strokeWidth="1.5"
+          strokeDasharray={capturing ? "4 3" : "2 6"} opacity="0.5"
+          style={{
+            transformOrigin: '50px 50px',
+            animation: capturing ? 'spin 1.2s linear infinite' : 'none',
+          }} />
+      </svg>
+    </div>
+  );
+}
+</script>
+
+<!-- ============================================================
+     SCREEN — SCAN (calls /api/identify while showing radar)
+     ============================================================ -->
+<script type="text/babel">
+function ScanScreen({ photoUrl, onComplete, onError }) {
+  const [progress, setProgress] = React.useState(0);
+  const [detected, setDetected] = React.useState([]);
+  const [statusLabel, setStatusLabel] = React.useState('Reading leaf shape…');
+
+  React.useEffect(() => {
+    let cancelled = false;
+    const start = Date.now();
+
+    // Animation loop — caps at 95% until the real response lands.
+    let raf;
+    const tick = () => {
+      if (cancelled) return;
+      const elapsed = (Date.now() - start) / 1000;
+      const t = Math.min(0.95, elapsed / 8); // 8s max anim, caps at 95%
+      setProgress(t);
+      if (t >= 0.3 && detected.length < 1) setDetected([PLANTS[0].id]);
+      if (t >= 0.55 && detected.length < 2) setDetected([PLANTS[0].id, PLANTS[2].id]);
+      if (t >= 0.8 && detected.length < 3) setDetected([PLANTS[0].id, PLANTS[2].id, PLANTS[1].id]);
+      setStatusLabel(
+        t < 0.35 ? 'Reading leaf shape…'
+          : t < 0.65 ? 'Matching venation…'
+            : t < 0.9 ? 'Narrowing to species…'
+              : 'Almost there.'
+      );
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+
+    // Fire the real identification call
+    (async () => {
+      try {
+        const res = await fetch('/api/identify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: photoUrl }),
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          throw new Error(`Identify failed (${res.status}): ${text.slice(0, 200)}`);
+        }
+        const data = await res.json();
+        if (cancelled) return;
+        setProgress(1);
+        setStatusLabel('Done.');
+        // small delay to let user see 100%
+        setTimeout(() => !cancelled && onComplete(data), 220);
+      } catch (err) {
+        if (cancelled) return;
+        console.error(err);
+        onError(err.message || 'Identification failed');
+      }
+    })();
+
+    return () => { cancelled = true; cancelAnimationFrame(raf); };
+  }, []);
+
+  const matches = [
+    { id: 'monstera', label: 'Aroid family', angle: -60 },
+    { id: 'fern', label: 'Leaf texture', angle: 40 },
+    { id: 'lavender', label: 'Vein pattern', angle: 140 },
+  ];
+
+  return (
+    <div style={{
+      width: '100%', height: '100%', position: 'relative',
+      background: `radial-gradient(circle at 50% 35%, ${THEME.accentDeep}, ${THEME.ink})`,
+      color: '#fff', fontFamily: FONTS.body, overflow: 'hidden',
+    }}>
+      {/* Blurred subject behind radar */}
+      {photoUrl && (
+        <div style={{
+          position: 'absolute', inset: 0,
+          background: `center/cover url(${photoUrl})`,
+          filter: `blur(${(1 - progress) * 16 + 4}px) saturate(${0.3 + progress * 0.7})`,
+          opacity: 0.35,
+        }} />
+      )}
+      <div style={{
+        position: 'absolute', inset: 0,
+        background: `
+          radial-gradient(ellipse at 30% 20%, ${THEME.accentGlow}44 0%, transparent 55%),
+          radial-gradient(ellipse at 70% 60%, ${THEME.accent}66 0%, transparent 60%)
+        `,
+      }} />
+
+      <div style={{
+        position: 'relative', height: '60%',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}>
+        <div style={{ position: 'relative', width: 260, height: 260 }}>
+          {[0, 1, 2].map(i => (
+            <div key={i} style={{
+              position: 'absolute', inset: 0, borderRadius: '50%',
+              border: `1.5px solid ${THEME.accentGlow}66`,
+              animation: `radarPulse 2s ${i * 0.5}s ease-out infinite`,
+            }} />
+          ))}
+          <svg viewBox="0 0 260 260" width="260" height="260" style={{
+            position: 'absolute', inset: 0,
+            animation: 'spin 2.4s linear infinite',
+          }}>
+            <defs>
+              <linearGradient id="scanbeam" x1="0" x2="1">
+                <stop offset="0%" stopColor={THEME.accentGlow} stopOpacity="0" />
+                <stop offset="100%" stopColor={THEME.accentGlow} stopOpacity="0.7" />
+              </linearGradient>
+            </defs>
+            <path d="M130 130 L 260 130 A 130 130 0 0 0 130 0 Z" fill="url(#scanbeam)" />
+          </svg>
+
+          <div style={{
+            position: 'absolute', inset: 55, borderRadius: '50%',
+            background: photoUrl
+              ? `center/cover url(${photoUrl})`
+              : `radial-gradient(circle, ${THEME.accent}, ${THEME.accentDeep})`,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            boxShadow: `0 0 40px ${THEME.accentGlow}66`,
+            overflow: 'hidden',
+          }}>
+            {!photoUrl && <IconLeaf size={64} stroke="#fff" sw={1.5} />}
+          </div>
+
+          {matches.map((m, i) => {
+            const visible = detected.includes(m.id);
+            const rad = m.angle * Math.PI / 180;
+            const r = 130;
+            const x = 130 + Math.cos(rad) * r;
+            const y = 130 + Math.sin(rad) * r;
+            return (
+              <div key={i} style={{
+                position: 'absolute', left: x, top: y,
+                width: 12, height: 12, marginLeft: -6, marginTop: -6,
+                borderRadius: '50%', background: THEME.accentGlow,
+                boxShadow: `0 0 0 4px ${THEME.accentGlow}33`,
+                opacity: visible ? 1 : 0,
+                transform: `scale(${visible ? 1 : 0.2})`,
+                transition: 'all 400ms cubic-bezier(0.34, 1.6, 0.4, 1)',
+              }}>
+                <div style={{
+                  position: 'absolute', left: x > 130 ? 18 : 'auto', right: x <= 130 ? 18 : 'auto',
+                  top: -4, whiteSpace: 'nowrap',
+                  background: 'rgba(255,255,255,0.15)',
+                  backdropFilter: 'blur(10px)',
+                  color: '#fff', padding: '4px 10px', borderRadius: 999,
+                  fontSize: 11, fontWeight: 500,
+                }}>{m.label}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div style={{
+        position: 'absolute', bottom: `calc(60px + env(safe-area-inset-bottom))`, left: 24, right: 24,
+        textAlign: 'center',
+      }}>
+        <div style={{
+          fontFamily: FONTS.heading, fontSize: 34, fontWeight: 500,
+          letterSpacing: -0.5, marginBottom: 8,
+        }}>{statusLabel}</div>
+        <div style={{
+          height: 3, background: 'rgba(255,255,255,0.15)', borderRadius: 3,
+          overflow: 'hidden', maxWidth: 240, margin: '0 auto',
+        }}>
+          <div style={{
+            height: '100%', width: `${progress * 100}%`,
+            background: THEME.accentGlow, transition: 'width 0.2s',
+          }} />
+        </div>
+        <div style={{ fontSize: 12, opacity: 0.6, marginTop: 10, letterSpacing: 0.5 }}>
+          {Math.round(progress * 100)}%  •  {detected.length} matches
+        </div>
+      </div>
+    </div>
+  );
+}
+</script>
+
+<!-- ============================================================
+     SCREEN — RESULTS
+     ============================================================ -->
+<script type="text/babel">
+function ResultsScreen({ photoUrl, matches, onBack, onSelect, onSave }) {
+  const [idx, setIdx] = React.useState(0);
+  const [saved, setSaved] = React.useState(false);
+  const safeMatches = matches && matches.length ? matches : [];
+  const current = safeMatches[idx];
+
+  if (!current) {
+    return (
+      <div style={{
+        width: '100%', height: '100%', background: THEME.bg, color: THEME.ink,
+        fontFamily: FONTS.body, display: 'flex', flexDirection: 'column',
+        alignItems: 'center', justifyContent: 'center', padding: 24, gap: 14, textAlign: 'center',
+      }}>
+        <div style={{ fontFamily: FONTS.heading, fontSize: 28 }}>No matches found</div>
+        <div style={{ color: THEME.inkMuted, fontSize: 14 }}>
+          We couldn't identify anything in this image. Try a closer, sharper shot.
+        </div>
+        <button onClick={onBack} style={{
+          marginTop: 8, padding: '12px 20px', borderRadius: THEME.radiusSm,
+          background: THEME.accent, color: '#fff', fontWeight: 700,
+        }}>Try again</button>
+      </div>
+    );
+  }
+
+  const handleSave = () => {
+    if (saved) return;
+    onSave(current);
+    setSaved(true);
+  };
+
+  return (
+    <div style={{
+      width: '100%', height: '100%', background: THEME.bg,
+      color: THEME.ink, fontFamily: FONTS.body,
+      display: 'flex', flexDirection: 'column', overflow: 'hidden',
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: `calc(16px + env(safe-area-inset-top)) 16px 10px`,
+      }}>
+        <button onClick={onBack} style={{
+          width: 40, height: 40, borderRadius: '50%',
+          background: THEME.surface, boxShadow: THEME.shadow,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}><IconBack size={18} stroke={THEME.ink} /></button>
+        <div style={{ fontSize: 13, color: THEME.inkMuted, fontWeight: 500 }}>
+          {safeMatches.length} {safeMatches.length === 1 ? 'match' : 'matches'}
+        </div>
+        <button onClick={handleSave} style={{
+          width: 40, height: 40, borderRadius: '50%',
+          background: saved ? THEME.accent : THEME.surface,
+          color: saved ? '#fff' : THEME.ink,
+          boxShadow: THEME.shadow,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}><IconBookmark size={18} stroke={saved ? '#fff' : THEME.ink} /></button>
+      </div>
+
+      <div style={{ padding: '0 20px 16px' }}>
+        <div style={{
+          position: 'relative', borderRadius: THEME.radius, overflow: 'hidden',
+          boxShadow: THEME.shadowLg, height: 280,
+        }}>
+          <FloraImage plant={current.plant} size="100%" style={{ width: '100%', height: '100%' }} rounded={THEME.radius} photoUrl={photoUrl} />
+
+          <div style={{
+            position: 'absolute', top: 16, right: 16,
+            width: 64, height: 64,
+          }}>
+            <svg viewBox="0 0 64 64" width="64" height="64">
+              <circle cx="32" cy="32" r="28" fill="rgba(0,0,0,0.35)" />
+              <circle cx="32" cy="32" r="28" fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="3" />
+              <circle cx="32" cy="32" r="28" fill="none" stroke="#fff" strokeWidth="3"
+                strokeDasharray={`${current.conf * 176} 176`}
+                strokeLinecap="round"
+                transform="rotate(-90 32 32)" />
+              <text x="32" y="37" textAnchor="middle" fontSize="16" fontWeight="700" fill="#fff">
+                {Math.round(current.conf * 100)}
+              </text>
+            </svg>
+          </div>
+
+          <div style={{
+            position: 'absolute', left: 0, right: 0, bottom: 0,
+            padding: '40px 20px 16px',
+            background: 'linear-gradient(180deg, transparent, rgba(0,0,0,0.75))',
+            color: '#fff',
+          }}>
+            <div style={{ fontSize: 11, opacity: 0.9, textTransform: 'uppercase', letterSpacing: 1.2, fontWeight: 600 }}>
+              Best match
+            </div>
+            <div style={{ fontFamily: FONTS.heading, fontSize: 34, fontWeight: 500, lineHeight: 1.05, marginTop: 2 }}>
+              {current.plant.common}
+            </div>
+            <div style={{ fontSize: 13, fontStyle: 'italic', opacity: 0.9 }}>
+              {current.plant.name}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ padding: '0 20px 10px', display: 'flex', gap: 8 }}>
+        {safeMatches.map((m, i) => (
+          <button key={i} onClick={() => setIdx(i)} style={{
+            flex: 1, cursor: 'pointer',
+            background: i === idx ? THEME.accent : THEME.surface,
+            color: i === idx ? '#fff' : THEME.ink,
+            padding: '10px 8px', borderRadius: THEME.radiusSm,
+            boxShadow: THEME.shadow, textAlign: 'left',
+          }}>
+            <div style={{ fontSize: 10, opacity: 0.75, textTransform: 'uppercase', letterSpacing: 0.8 }}>
+              {Math.round(m.conf * 100)}% match
+            </div>
+            <div style={{ fontSize: 13, fontWeight: 600, fontFamily: FONTS.heading, lineHeight: 1.1 }}>
+              {m.plant.common}
+            </div>
+          </button>
+        ))}
+      </div>
+
+      <div style={{ padding: '8px 20px', flex: 1, overflow: 'auto' }}>
+        <div style={{
+          display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14,
+        }}>
+          <FactCell icon={<IconPaw size={18} stroke={THEME.ink} />} label="Pet safety"
+            value={<ToxBadge tox={current.plant.toxicity.level} />} />
+          <FactCell icon={<IconBloom size={18} stroke={THEME.ink} />} label="Bloom"
+            value={<span style={{ fontSize: 12 }}>{current.plant.bloom.label}</span>} />
+        </div>
+        <div style={{
+          background: THEME.surface, borderRadius: THEME.radiusSm,
+          padding: 14, boxShadow: THEME.shadow,
+        }}>
+          <div style={{ fontSize: 14, lineHeight: 1.45, color: THEME.ink }}>
+            {current.plant.tagline}
+          </div>
+          <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
+            {(current.plant.tags || []).map(t => (
+              <span key={t} style={{
+                background: THEME.accentSoft, color: THEME.accentDeep,
+                fontSize: 11, fontWeight: 600, padding: '4px 9px',
+                borderRadius: 999,
+              }}>{t}</span>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ padding: '10px 20px calc(20px + env(safe-area-inset-bottom))', display: 'flex', gap: 10 }}>
+        <button onClick={handleSave} style={{
+          flex: 1, height: 52, borderRadius: THEME.radiusSm,
+          background: saved ? THEME.accentSoft : THEME.surface, boxShadow: THEME.shadow,
+          fontWeight: 600, color: THEME.ink, fontSize: 14,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+        }}>
+          <IconPlus size={16} stroke={THEME.ink} /> {saved ? 'Saved' : 'Save'}
+        </button>
+        <button onClick={() => onSelect(current)} style={{
+          flex: 2, height: 52, borderRadius: THEME.radiusSm,
+          background: THEME.accent, color: '#fff',
+          fontWeight: 700, fontSize: 15,
+        }}>Full profile →</button>
+      </div>
+    </div>
+  );
+}
+</script>
+
+<!-- ============================================================
+     SCREEN — DETAIL
+     ============================================================ -->
+<script type="text/babel">
+function DetailScreen({ plant, photoUrl, onBack }) {
+  const [tab, setTab] = React.useState('overview');
+  if (!plant) return null;
+
+  return (
+    <div style={{
+      width: '100%', height: '100%', background: THEME.bg,
+      color: THEME.ink, fontFamily: FONTS.body,
+      display: 'flex', flexDirection: 'column', overflow: 'hidden',
+    }}>
+      <div style={{ position: 'relative', height: 340, flexShrink: 0 }}>
+        <FloraImage plant={plant} size="100%" rounded={0}
+          photoUrl={photoUrl}
+          style={{ width: '100%', height: '100%', borderRadius: 0 }} />
+        <div style={{
+          position: 'absolute', inset: 0,
+          background: 'linear-gradient(180deg, rgba(0,0,0,0.25) 0%, transparent 30%, rgba(0,0,0,0.6) 100%)',
+        }} />
+        <div style={{
+          position: 'absolute', top: `calc(12px + env(safe-area-inset-top))`, left: 16, right: 16,
+          display: 'flex', justifyContent: 'space-between', zIndex: 10,
+        }}>
+          <button onClick={onBack} style={{
+            width: 40, height: 40, borderRadius: '50%',
+            background: 'rgba(255,255,255,0.9)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            backdropFilter: 'blur(10px)',
+          }}><IconBack size={18} stroke={THEME.ink} /></button>
+          <button style={{
+            width: 40, height: 40, borderRadius: '50%',
+            background: 'rgba(255,255,255,0.9)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}><IconBookmark size={18} stroke={THEME.ink} /></button>
+        </div>
+        <div style={{
+          position: 'absolute', bottom: 16, left: 20, right: 20, color: '#fff',
+        }}>
+          <ToxBadge tox={plant.toxicity.level} />
+          <div style={{
+            fontFamily: FONTS.heading, fontSize: 40, fontWeight: 500,
+            lineHeight: 1.02, marginTop: 8, letterSpacing: -0.5,
+          }}>{plant.common}</div>
+          <div style={{ fontStyle: 'italic', fontSize: 14, opacity: 0.9 }}>
+            {plant.name} · {plant.family}
+          </div>
+        </div>
+      </div>
+
+      <div style={{
+        display: 'flex', padding: '0 20px', gap: 4,
+        borderBottom: `1px solid ${THEME.accentSoft}`, flexShrink: 0,
+      }}>
+        {['overview', 'care', 'nearby', 'similar'].map(t => (
+          <button key={t} onClick={() => setTab(t)} style={{
+            flex: 1, background: 'transparent',
+            padding: '14px 6px',
+            fontWeight: 600, fontSize: 13,
+            color: tab === t ? THEME.accent : THEME.inkMuted,
+            textTransform: 'capitalize',
+            borderBottom: `2px solid ${tab === t ? THEME.accent : 'transparent'}`,
+            marginBottom: -1,
+          }}>{t}</button>
+        ))}
+      </div>
+
+      <div style={{ flex: 1, overflow: 'auto', padding: '16px 20px calc(24px + env(safe-area-inset-bottom))' }}>
+        {tab === 'overview' && <OverviewTab plant={plant} />}
+        {tab === 'care' && <CareTab plant={plant} />}
+        {tab === 'nearby' && <NearbyTab plant={plant} />}
+        {tab === 'similar' && <SimilarTab plant={plant} />}
+      </div>
+    </div>
+  );
+}
+
+function OverviewTab({ plant }) {
+  return (
+    <div>
+      <p style={{ fontSize: 15, lineHeight: 1.5, color: THEME.ink, margin: '0 0 14px' }}>
+        {plant.tagline}
+      </p>
+      <Row label="Native range" value={plant.native} />
+      <Row label="Habitat" value={plant.habitat} />
+      <Row label="Family" value={plant.family} />
+      <Row label="Edibility" value={plant.edibility} />
+
+      <SectionTitle>Bloom calendar</SectionTitle>
+      <BloomStrip months={plant.bloom.months} />
+      <div style={{ fontSize: 12, color: THEME.inkMuted, marginTop: 8 }}>
+        {plant.bloom.label}
+      </div>
+
+      <SectionTitle>Safety</SectionTitle>
+      <div style={{
+        background: plant.toxicity.level === 'safe' ? '#e8f3e4' :
+          plant.toxicity.level === 'toxic' ? '#fde8d0' : '#fae0dd',
+        borderLeft: `3px solid ${plant.toxicity.level === 'safe' ? '#3a7a3a' :
+          plant.toxicity.level === 'toxic' ? '#d47a2a' : '#c94a3a'}`,
+        padding: 14, borderRadius: THEME.radiusTight,
+        fontSize: 13, lineHeight: 1.5, color: THEME.ink,
+      }}>
+        {plant.toxicity.note}
+      </div>
+    </div>
+  );
+}
+
+function Row({ label, value }) {
+  return (
+    <div style={{
+      display: 'flex', justifyContent: 'space-between', gap: 16,
+      padding: '10px 0',
+      borderBottom: `1px solid ${THEME.accentSoft}55`,
+      fontSize: 13,
+    }}>
+      <div style={{ color: THEME.inkMuted, fontWeight: 500, flexShrink: 0 }}>{label}</div>
+      <div style={{ color: THEME.ink, textAlign: 'right', fontWeight: 500 }}>{value}</div>
+    </div>
+  );
+}
+
+function SectionTitle({ children }) {
+  return (
+    <h3 style={{
+      fontFamily: FONTS.heading, fontSize: 24, fontWeight: 500,
+      margin: '22px 0 10px', letterSpacing: -0.2, color: THEME.ink,
+    }}>{children}</h3>
+  );
+}
+
+function BloomStrip({ months }) {
+  const letters = ['J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D'];
+  return (
+    <div style={{ display: 'flex', gap: 4 }}>
+      {letters.map((L, i) => {
+        const active = (months || []).includes(i + 1);
+        return (
+          <div key={i} style={{
+            flex: 1, height: 36, borderRadius: 6,
+            background: active ? THEME.accent : THEME.surface,
+            color: active ? '#fff' : THEME.inkMuted,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 11, fontWeight: 700,
+            boxShadow: active ? 'none' : `inset 0 0 0 1px ${THEME.accentSoft}`,
+          }}>{L}</div>
+        );
+      })}
+    </div>
+  );
+}
+
+function CareTab({ plant }) {
+  const care = plant.care || {};
+  const items = [
+    { icon: <IconSun size={22} stroke={THEME.accent} />, label: 'Light', value: care.light || '—' },
+    { icon: <IconDrop size={22} stroke={THEME.accent} />, label: 'Water', value: care.water || '—' },
+    { icon: <IconBloom size={22} stroke={THEME.accent} />, label: 'Humidity', value: care.humidity || '—' },
+    { icon: <IconThermo size={22} stroke={THEME.accent} />, label: 'Temperature', value: care.temp || '—' },
+  ];
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+      {items.map((it, i) => (
+        <div key={i} style={{
+          background: THEME.surface, borderRadius: THEME.radiusSm,
+          padding: 14, boxShadow: THEME.shadow,
+        }}>
+          <div style={{ marginBottom: 8 }}>{it.icon}</div>
+          <div style={{
+            fontSize: 11, color: THEME.inkMuted, textTransform: 'uppercase',
+            letterSpacing: 0.5, fontWeight: 600,
+          }}>{it.label}</div>
+          <div style={{ fontSize: 15, color: THEME.ink, fontWeight: 500, marginTop: 2 }}>
+            {it.value}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function NearbyTab({ plant }) {
+  return (
+    <div>
+      <div style={{
+        background: THEME.accentDeep, color: '#fff',
+        borderRadius: THEME.radiusSm, padding: 16, marginBottom: 12,
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+      }}>
+        <div>
+          <div style={{ fontSize: 12, opacity: 0.8, fontWeight: 600, letterSpacing: 0.5, textTransform: 'uppercase' }}>
+            Around you
+          </div>
+          <div style={{ fontFamily: FONTS.heading, fontSize: 32, fontWeight: 500, marginTop: 2 }}>
+            {plant.nearby ?? '—'} sightings
+          </div>
+        </div>
+        <div style={{ fontSize: 44 }}>🌿</div>
+      </div>
+      <div style={{
+        height: 220, borderRadius: THEME.radiusSm, position: 'relative',
+        background: `
+          linear-gradient(135deg, ${THEME.accentSoft}44 0%, ${THEME.accentGlow}44 50%, ${THEME.accentSoft}44 100%),
+          ${THEME.surface}
+        `,
+        overflow: 'hidden', boxShadow: THEME.shadow,
+      }}>
+        <svg width="100%" height="100%" viewBox="0 0 400 220" preserveAspectRatio="xMidYMid slice">
+          <path d="M0 70 Q 150 40 400 100" fill="none" stroke={THEME.accentSoft} strokeWidth="18" />
+          <path d="M0 70 Q 150 40 400 100" fill="none" stroke="#fff" strokeWidth="2" />
+          <path d="M200 0 L 180 220" fill="none" stroke={THEME.accentSoft} strokeWidth="16" />
+          <path d="M200 0 L 180 220" fill="none" stroke="#fff" strokeWidth="2" />
+          <ellipse cx="80" cy="150" rx="60" ry="40" fill={THEME.accentGlow} opacity="0.4" />
+          <ellipse cx="320" cy="170" rx="50" ry="30" fill={THEME.accentGlow} opacity="0.4" />
+          {[[90, 140], [130, 165], [70, 170], [310, 175], [330, 160], [200, 110], [230, 90]].map(([x, y], i) => (
+            <g key={i}>
+              <circle cx={x} cy={y} r="10" fill={THEME.accent} opacity="0.3" />
+              <circle cx={x} cy={y} r="5" fill={THEME.accent} />
+              <circle cx={x} cy={y} r="5" fill="none" stroke="#fff" strokeWidth="1.5" />
+            </g>
+          ))}
+          <g>
+            <circle cx="200" cy="140" r="22" fill={THEME.warm} opacity="0.25">
+              <animate attributeName="r" values="20;30;20" dur="2s" repeatCount="indefinite" />
+            </circle>
+            <circle cx="200" cy="140" r="9" fill={THEME.warm} />
+            <circle cx="200" cy="140" r="9" fill="none" stroke="#fff" strokeWidth="2.5" />
+          </g>
+        </svg>
+        <div style={{
+          position: 'absolute', bottom: 10, left: 10,
+          background: 'rgba(255,255,255,0.9)', backdropFilter: 'blur(10px)',
+          padding: '6px 10px', borderRadius: 999,
+          fontSize: 11, fontWeight: 600, color: THEME.ink,
+        }}>📍 Nearest: 0.3 km</div>
+      </div>
+    </div>
+  );
+}
+
+function SimilarTab({ plant }) {
+  const sims = (plant.similarDetail && plant.similarDetail.length)
+    ? plant.similarDetail
+    : PLANTS.filter(p => p.id !== plant.id).slice(0, 3);
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {sims.map((p, i) => (
+        <div key={i} style={{
+          display: 'flex', gap: 12, padding: 10, background: THEME.surface,
+          borderRadius: THEME.radiusSm, boxShadow: THEME.shadow, alignItems: 'center',
+        }}>
+          <FloraImage plant={p} size={64} rounded={THEME.radiusTight} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontFamily: FONTS.heading, fontSize: 20, fontWeight: 500, lineHeight: 1.1 }}>
+              {p.common}
+            </div>
+            <div style={{ fontSize: 12, fontStyle: 'italic', color: THEME.inkMuted, marginTop: 1 }}>
+              {p.name}
+            </div>
+            <div style={{ fontSize: 11, color: THEME.inkMuted, marginTop: 4 }}>
+              Differs by: {p.leafShape} leaves · {p.family}
+            </div>
+          </div>
+          <IconChevR size={18} stroke={THEME.inkMuted} />
+        </div>
+      ))}
+    </div>
+  );
+}
+</script>
+
+<!-- ============================================================
+     SCREEN — JOURNAL
+     ============================================================ -->
+<script type="text/babel">
+function JournalScreen({ onBack, onSelect }) {
+  const [entries, setEntries] = React.useState(() => loadJournal());
+
+  const removeEntry = (id) => {
+    const next = entries.filter(e => e.id !== id);
+    setEntries(next);
+    saveJournal(next);
+  };
+
+  const safeCount = entries.filter(e => (e.plant?.toxicity?.level || 'unknown') === 'safe').length;
+  const speciesCount = new Set(entries.map(e => e.plant?.id || e.plantId)).size;
+
+  return (
+    <div style={{
+      width: '100%', height: '100%', background: THEME.bg,
+      color: THEME.ink, fontFamily: FONTS.body,
+      display: 'flex', flexDirection: 'column', overflow: 'hidden',
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10,
+        padding: `calc(16px + env(safe-area-inset-top)) 16px 10px`,
+      }}>
+        <button onClick={onBack} style={{
+          width: 40, height: 40, borderRadius: '50%',
+          background: THEME.surface, boxShadow: THEME.shadow,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}><IconBack size={18} stroke={THEME.ink} /></button>
+        <div style={{ flex: 1 }}>
+          <div style={{
+            fontFamily: FONTS.heading, fontSize: 32, fontWeight: 500,
+            letterSpacing: -0.3, lineHeight: 1,
+          }}>My field journal</div>
+          <div style={{ fontSize: 12, color: THEME.inkMuted, marginTop: 2 }}>
+            {entries.length} {entries.length === 1 ? 'entry' : 'entries'}
+          </div>
+        </div>
+      </div>
+
+      <div style={{
+        display: 'flex', gap: 8, padding: '0 16px 14px', overflowX: 'auto',
+        flexShrink: 0,
+      }}>
+        {['All', 'Pet safe', 'Flowering now', 'Near me', 'Toxic'].map((f, i) => (
+          <button key={f} style={{
+            padding: '8px 14px', borderRadius: 999, flexShrink: 0,
+            background: i === 0 ? THEME.accent : THEME.surface,
+            color: i === 0 ? '#fff' : THEME.ink,
+            fontSize: 13, fontWeight: 600,
+            boxShadow: i === 0 ? 'none' : THEME.shadow,
+          }}>{f}</button>
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', gap: 10, padding: '0 16px 14px', flexShrink: 0 }}>
+        <StatBox label="Species" value={speciesCount.toString()} />
+        <StatBox label="Observations" value={entries.length.toString()} />
+        <StatBox label="Pet safe" value={safeCount.toString()} />
+      </div>
+
+      <div style={{ flex: 1, overflow: 'auto', padding: '0 16px calc(20px + env(safe-area-inset-bottom))' }}>
+        {entries.length === 0 ? (
+          <div style={{
+            textAlign: 'center', color: THEME.inkMuted, fontSize: 14,
+            padding: '40px 20px', lineHeight: 1.5,
+          }}>
+            Nothing here yet. Tap the capture button on the home screen and your saved finds will land here.
+          </div>
+        ) : entries.map((j, i) => {
+          const plant = j.plant || plantById(j.plantId);
+          if (!plant) return null;
+          return (
+            <div key={j.id || i} onClick={() => onSelect(j)} style={{
+              background: THEME.surface, borderRadius: THEME.radiusSm,
+              padding: 14, marginBottom: 10, boxShadow: THEME.shadow,
+              display: 'flex', gap: 14, cursor: 'pointer',
+            }}>
+              <FloraImage plant={plant} size={72} rounded={THEME.radiusTight} photoUrl={j.photoUrl} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                  <div style={{ fontFamily: FONTS.heading, fontSize: 22, fontWeight: 500, lineHeight: 1.05 }}>
+                    {plant.common}
+                  </div>
+                  <div style={{ fontSize: 11, color: THEME.inkMuted, flexShrink: 0, marginLeft: 8 }}>{j.date}</div>
+                </div>
+                <div style={{ fontSize: 11, fontStyle: 'italic', color: THEME.inkMuted }}>
+                  {plant.name}
+                </div>
+                {j.note && (
+                  <div style={{ fontSize: 12, color: THEME.ink, marginTop: 6, lineHeight: 1.35 }}>
+                    "{j.note}"
+                  </div>
+                )}
+                {j.location && (
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 4, fontSize: 11,
+                    color: THEME.inkMuted, marginTop: 6,
+                  }}>
+                    <IconPin size={11} stroke={THEME.inkMuted} /> {j.location}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function StatBox({ label, value }) {
+  return (
+    <div style={{
+      flex: 1, background: THEME.surface, borderRadius: THEME.radiusSm,
+      padding: '10px 12px', boxShadow: THEME.shadow,
+    }}>
+      <div style={{
+        fontSize: 10, color: THEME.inkMuted, textTransform: 'uppercase',
+        fontWeight: 600, letterSpacing: 0.5,
+      }}>{label}</div>
+      <div style={{
+        fontFamily: FONTS.heading, fontSize: 30, fontWeight: 500,
+        color: THEME.ink, lineHeight: 1,
+      }}>{value}</div>
+    </div>
+  );
+}
+</script>
+
+<!-- ============================================================
+     APP SHELL
+     ============================================================ -->
+<script type="text/babel">
+function normaliseMatch(m) {
+  // Claude returns structured data matching this shape. Defensive defaults for anything missing.
+  const tox = (m.toxicity?.level || 'unknown').toLowerCase();
+  const plant = {
+    id: m.id || (m.name || 'unknown').toLowerCase().replace(/\s+/g, '-'),
+    name: m.scientific_name || m.name || 'Unknown species',
+    common: m.common_name || m.name || 'Unknown',
+    family: m.family || '—',
+    colors: pickColors(tox),
+    photo: 'linear-gradient(135deg, #1f3a28 0%, #2d5a3d 35%, #4a7c5a 70%, #8cb89a 100%)',
+    leafShape: pickLeafShape(m.common_name || m.name),
+    tagline: m.tagline || m.description || '',
+    native: m.native_range || m.native || '—',
+    habitat: m.habitat || '—',
+    bloom: {
+      months: Array.isArray(m.bloom?.months) ? m.bloom.months : [],
+      label: m.bloom?.label || m.bloom_label || 'Not specified',
+    },
+    toxicity: {
+      level: tox === 'safe' || tox === 'toxic' || tox === 'severe' ? tox : 'unknown',
+      note: m.toxicity?.note || 'No toxicity information.',
+    },
+    edibility: m.edibility || '—',
+    care: {
+      light: m.care?.light || '—',
+      water: m.care?.water || '—',
+      humidity: m.care?.humidity || '—',
+      temp: m.care?.temperature || m.care?.temp || '—',
+    },
+    nearby: m.nearby ?? null,
+    tags: m.tags || [],
+    similarDetail: [],
+  };
+  return {
+    plant,
+    conf: typeof m.confidence === 'number' ? m.confidence : 0.8,
+  };
+}
+
+function FloraApp() {
+  const [screen, setScreen] = React.useState('home');
+  const [photoUrl, setPhotoUrl] = React.useState(null);
+  const [matches, setMatches] = React.useState([]);
+  const [activePlant, setActivePlant] = React.useState(null);
+  const [journalVersion, setJournalVersion] = React.useState(0);
+
+  const recentCount = React.useMemo(() => loadJournal().length, [journalVersion]);
+
+  const startScan = (dataUrl) => {
+    setPhotoUrl(dataUrl);
+    setMatches([]);
+    setScreen('scan');
+  };
+
+  const onScanComplete = (data) => {
+    const normalised = (data.matches || []).map(normaliseMatch);
+    setMatches(normalised);
+    setScreen('results');
+  };
+
+  const onScanError = (msg) => {
+    alert('Sorry — ' + msg);
+    setScreen('home');
+  };
+
+  const onSaveMatch = (match) => {
+    const entry = {
+      plant: match.plant,
+      photoUrl,
+      date: new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+      location: 'Captured here',
+      note: match.plant.tagline || '',
+    };
+    addJournalEntry(entry);
+    setJournalVersion(v => v + 1);
+  };
+
+  const openDetail = (matchOrEntry) => {
+    // Accept either a ResultsScreen match {plant, conf} or a Journal entry {plant, photoUrl, ...}
+    setActivePlant(matchOrEntry.plant);
+    if (matchOrEntry.photoUrl) setPhotoUrl(matchOrEntry.photoUrl);
+    setScreen('detail');
+  };
+
+  const backFromDetail = () => {
+    // If we came from journal, go back to journal. Else results.
+    setScreen(matches.length ? 'results' : 'journal');
+  };
+
+  return (
+    <div style={{ width: '100%', height: '100%' }}>
+      {screen === 'home' && (
+        <HomeScreen
+          onCapture={startScan}
+          onOpenJournal={() => setScreen('journal')}
+          recentCount={recentCount}
+        />
+      )}
+      {screen === 'scan' && (
+        <ScanScreen
+          photoUrl={photoUrl}
+          onComplete={onScanComplete}
+          onError={onScanError}
+        />
+      )}
+      {screen === 'results' && (
+        <ResultsScreen
+          photoUrl={photoUrl}
+          matches={matches}
+          onBack={() => setScreen('home')}
+          onSelect={openDetail}
+          onSave={onSaveMatch}
+        />
+      )}
+      {screen === 'detail' && (
+        <DetailScreen
+          plant={activePlant}
+          photoUrl={photoUrl}
+          onBack={backFromDetail}
+        />
+      )}
+      {screen === 'journal' && (
+        <JournalScreen
+          onBack={() => setScreen('home')}
+          onSelect={openDetail}
+        />
+      )}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<FloraApp />);
+</script>
+
+</body>
+</html>
