@@ -1002,10 +1002,12 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
         </div>
 
         <div style={{
-          flex: 1, overflow: 'hidden', padding: '4px 20px 20px',
+          flex: 1, minHeight: 0,
+          overflowY: 'auto', WebkitOverflowScrolling: 'touch',
+          padding: '4px 20px 20px',
           display: 'flex', flexDirection: 'column', gap: 12,
         }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexShrink: 0 }}>
             <h3 style={{
               fontFamily: FONTS.heading, fontSize: 28, margin: 0,
               fontWeight: 500, letterSpacing: -0.3,
@@ -1021,13 +1023,14 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
           <div style={{
             display: 'flex', gap: 10, overflowX: 'auto',
             margin: '0 -20px', padding: '0 20px 4px',
+            flexShrink: 0,
           }}>
             {(nearby && nearby.length ? nearby : PLANTS).map(p => (
               <NearbyCard key={p.id} plant={p} onClick={() => onSelectPlant && onSelectPlant(p)} />
             ))}
           </div>
           {nearbyErr && (
-            <div style={{ fontSize: 11, color: THEME.inkMuted, marginTop: -4 }}>
+            <div style={{ fontSize: 11, color: THEME.inkMuted, marginTop: -4, flexShrink: 0 }}>
               Showing seed species · allow location for real nearby plants
             </div>
           )}
@@ -1759,8 +1762,30 @@ function SimilarTab({ plant }) {
      SCREEN — JOURNAL
      ============================================================ -->
 <script type="text/babel">
+const FILTERS = ['All', 'Pet safe', 'Flowering now', 'Toxic'];
+
+function applyJournalFilter(entries, filter) {
+  if (filter === 'All') return entries;
+  const currentMonth = new Date().getMonth() + 1;
+  return entries.filter(e => {
+    const plant = e.plant || plantById(e.plantId);
+    if (!plant) return false;
+    if (filter === 'Pet safe') return plant.toxicity?.level === 'safe';
+    if (filter === 'Toxic') {
+      const t = plant.toxicity?.level;
+      return t === 'toxic' || t === 'severe';
+    }
+    if (filter === 'Flowering now') {
+      const months = plant.bloom?.months;
+      return Array.isArray(months) && months.includes(currentMonth);
+    }
+    return true;
+  });
+}
+
 function JournalScreen({ onBack, onSelect }) {
   const [entries, setEntries] = React.useState(() => loadJournal());
+  const [filter, setFilter] = React.useState('All');
 
   const removeEntry = (id) => {
     const next = entries.filter(e => e.id !== id);
@@ -1768,6 +1793,7 @@ function JournalScreen({ onBack, onSelect }) {
     saveJournal(next);
   };
 
+  const filtered = applyJournalFilter(entries, filter);
   const safeCount = entries.filter(e => (e.plant?.toxicity?.level || 'unknown') === 'safe').length;
   const speciesCount = new Set(entries.map(e => e.plant?.id || e.plantId)).size;
 
@@ -1801,15 +1827,19 @@ function JournalScreen({ onBack, onSelect }) {
         display: 'flex', gap: 8, padding: '0 16px 14px', overflowX: 'auto',
         flexShrink: 0,
       }}>
-        {['All', 'Pet safe', 'Flowering now', 'Near me', 'Toxic'].map((f, i) => (
-          <button key={f} style={{
-            padding: '8px 14px', borderRadius: 999, flexShrink: 0,
-            background: i === 0 ? THEME.accent : THEME.surface,
-            color: i === 0 ? '#fff' : THEME.ink,
-            fontSize: 13, fontWeight: 600,
-            boxShadow: i === 0 ? 'none' : THEME.shadow,
-          }}>{f}</button>
-        ))}
+        {FILTERS.map((f) => {
+          const active = filter === f;
+          return (
+            <button key={f} onClick={() => setFilter(f)} style={{
+              padding: '8px 14px', borderRadius: 999, flexShrink: 0,
+              background: active ? THEME.accent : THEME.surface,
+              color: active ? '#fff' : THEME.ink,
+              fontSize: 13, fontWeight: 600,
+              boxShadow: active ? 'none' : THEME.shadow,
+              transition: 'background 160ms, color 160ms',
+            }}>{f}</button>
+          );
+        })}
       </div>
 
       <div style={{ display: 'flex', gap: 10, padding: '0 16px 14px', flexShrink: 0 }}>
@@ -1826,14 +1856,21 @@ function JournalScreen({ onBack, onSelect }) {
           }}>
             Nothing here yet. Tap the capture button on the home screen and your saved finds will land here.
           </div>
-        ) : entries.map((j, i) => {
+        ) : filtered.length === 0 ? (
+          <div style={{
+            textAlign: 'center', color: THEME.inkMuted, fontSize: 14,
+            padding: '30px 20px', lineHeight: 1.5,
+          }}>
+            No {filter.toLowerCase()} entries. Try another filter.
+          </div>
+        ) : filtered.map((j, i) => {
           const plant = j.plant || plantById(j.plantId);
           if (!plant) return null;
           return (
             <div key={j.id || i} onClick={() => onSelect(j)} style={{
               background: THEME.surface, borderRadius: THEME.radiusSm,
               padding: 14, marginBottom: 10, boxShadow: THEME.shadow,
-              display: 'flex', gap: 14, cursor: 'pointer',
+              display: 'flex', gap: 14, cursor: 'pointer', position: 'relative',
             }}>
               <FloraImage plant={plant} size={72} rounded={THEME.radiusTight} photoUrl={j.photoUrl} />
               <div style={{ flex: 1, minWidth: 0 }}>
@@ -1845,6 +1882,18 @@ function JournalScreen({ onBack, onSelect }) {
                 </div>
                 <div style={{ fontSize: 11, fontStyle: 'italic', color: THEME.inkMuted }}>
                   {plant.name}
+                </div>
+                <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+                  {plant.toxicity?.level && plant.toxicity.level !== 'unknown' && (
+                    <ToxBadge tox={plant.toxicity.level} small />
+                  )}
+                  {plant.bloom?.months?.includes(new Date().getMonth() + 1) && (
+                    <span style={{
+                      fontSize: 10, fontWeight: 600,
+                      background: THEME.accentSoft, color: THEME.accentDeep,
+                      padding: '2px 7px', borderRadius: 999,
+                    }}>🌸 in bloom</span>
+                  )}
                 </div>
                 {j.note && (
                   <div style={{ fontSize: 12, color: THEME.ink, marginTop: 6, lineHeight: 1.35 }}>
@@ -1860,6 +1909,13 @@ function JournalScreen({ onBack, onSelect }) {
                   </div>
                 )}
               </div>
+              <button onClick={(e) => { e.stopPropagation(); if (confirm('Remove this entry?')) removeEntry(j.id); }} aria-label="Remove entry" style={{
+                position: 'absolute', top: 8, right: 8,
+                width: 28, height: 28, borderRadius: '50%',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: THEME.inkMuted, fontSize: 18, lineHeight: 1,
+                opacity: 0.4,
+              }}>×</button>
             </div>
           );
         })}
