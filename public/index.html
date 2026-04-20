@@ -512,7 +512,7 @@ function JournalRow({ entry }) {
           <div style={{ fontFamily: FONTS.heading, fontSize: 18, fontWeight: 500, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {plant.common}
           </div>
-          <div style={{ fontSize: 11, color: THEME.inkMuted, flexShrink: 0 }}>{entry.date}</div>
+          <div style={{ fontSize: 11, color: THEME.inkMuted, flexShrink: 0 }}>{formatEntryTime(entry)}</div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
           <CategoryChip category={plant.category} />
@@ -649,12 +649,32 @@ async function apiDeleteEntry(id) {
   }
   return res.json();
 }
+
+// Prefer the server-side createdAt (unix ms) so we can show both date and
+// time consistently. Falls back to the optimistic entry's `date` string
+// while a save is still in flight.
+function formatEntryTime(entry) {
+  if (entry && typeof entry.createdAt === 'number') {
+    return new Date(entry.createdAt).toLocaleString(undefined, {
+      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+    });
+  }
+  return (entry && entry.date) || '';
+}
 </script>
 
 <!-- ============================================================
      SCREEN — HOME (camera capture)
      ============================================================ -->
 <script type="text/babel">
+const PART_PREF_KEY = 'flora:capture_part:v1';
+const CAPTURE_PARTS = [
+  { id: 'leaf', label: 'leaf' },
+  { id: 'whole', label: 'whole plant' },
+  { id: 'bark', label: 'bark' },
+  { id: 'flower', label: 'flower' },
+];
+
 function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEntries, onSelectPlant }) {
   const [capturing, setCapturing] = React.useState(false);
   const [sheetOpen, setSheetOpen] = React.useState(false);
@@ -664,6 +684,14 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
   const [nearbyErr, setNearbyErr] = React.useState(null);
   const fileRef = React.useRef(null);
   const recentJournal = recentEntries || [];
+  const [selectedPart, setSelectedPartRaw] = React.useState(() => {
+    try { return localStorage.getItem(PART_PREF_KEY) || 'whole'; }
+    catch { return 'whole'; }
+  });
+  const setSelectedPart = (p) => {
+    setSelectedPartRaw(p);
+    try { localStorage.setItem(PART_PREF_KEY, p); } catch {}
+  };
 
   const onHandleTouchStart = (e) => {
     dragStartY.current = e.touches[0].clientY;
@@ -827,7 +855,7 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
         canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
         const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
         // Brief visual pause so the capture button animation reads
-        setTimeout(() => onCapture(dataUrl), 220);
+        setTimeout(() => onCapture(dataUrl, selectedPart), 220);
       } catch (err) {
         console.error('Canvas capture failed', err);
         setCapturing(false);
@@ -846,7 +874,7 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
     setCapturing(true);
     try {
       const dataUrl = await shrinkImage(file);
-      onCapture(dataUrl);
+      onCapture(dataUrl, selectedPart);
     } catch (err) {
       console.error('image processing failed', err);
       setCapturing(false);
@@ -1085,14 +1113,22 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
         </div>
 
         <div style={{
-          display: 'flex', justifyContent: 'center', gap: 24,
-          padding: '0 20px 14px', fontSize: 13, fontWeight: 600,
-          color: THEME.inkMuted,
+          display: 'flex', justifyContent: 'center', gap: 8,
+          padding: '0 16px 14px', flexWrap: 'wrap',
         }}>
-          <span>leaf</span>
-          <span style={{ color: THEME.accent }}>● whole plant</span>
-          <span>bark</span>
-          <span>flower</span>
+          {CAPTURE_PARTS.map(p => {
+            const active = selectedPart === p.id;
+            return (
+              <button key={p.id} onClick={() => setSelectedPart(p.id)} style={{
+                padding: '6px 14px', borderRadius: 999, border: 'none',
+                background: active ? THEME.accent : 'transparent',
+                color: active ? '#fff' : THEME.inkMuted,
+                fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                boxShadow: active ? THEME.shadow : 'inset 0 0 0 1px rgba(0,0,0,0.08)',
+                transition: 'background 160ms, color 160ms',
+              }}>{p.label}</button>
+            );
+          })}
         </div>
 
         <div style={{
@@ -1155,7 +1191,7 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
      SCREEN — SCAN (calls /api/identify while showing radar)
      ============================================================ -->
 <script type="text/babel">
-function ScanScreen({ photoUrl, onComplete, onError }) {
+function ScanScreen({ photoUrl, part, onComplete, onError }) {
   const [progress, setProgress] = React.useState(0);
   const [detected, setDetected] = React.useState([]);
   const [statusLabel, setStatusLabel] = React.useState('Reading shape, colour, texture…');
@@ -1190,7 +1226,7 @@ function ScanScreen({ photoUrl, onComplete, onError }) {
         const res = await fetch('/api/identify', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image: photoUrl }),
+          body: JSON.stringify({ image: photoUrl, part: part || undefined }),
         });
         if (!res.ok) {
           const text = await res.text().catch(() => '');
@@ -1987,29 +2023,55 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 }
 
 function SimilarTab({ plant }) {
-  const sims = (plant.similarDetail && plant.similarDetail.length)
-    ? plant.similarDetail
-    : PLANTS.filter(p => p.id !== plant.id).slice(0, 3);
+  const sims = plant.similarDetail || [];
+
+  if (sims.length === 0) {
+    return (
+      <div style={{
+        background: THEME.surface, borderRadius: THEME.radiusSm,
+        padding: 18, boxShadow: THEME.shadow,
+        fontSize: 14, color: THEME.inkMuted, lineHeight: 1.5, textAlign: 'center',
+      }}>
+        No look-alikes were suggested for this match. The identifier is confident this one is distinctive enough that confusion is unlikely.
+      </div>
+    );
+  }
+
+  const openWiki = (sci) => {
+    if (!sci) return;
+    const url = `https://en.wikipedia.org/wiki/${encodeURIComponent(sci.replace(/ /g, '_'))}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       {sims.map((p, i) => (
-        <div key={i} style={{
-          display: 'flex', gap: 12, padding: 10, background: THEME.surface,
-          borderRadius: THEME.radiusSm, boxShadow: THEME.shadow, alignItems: 'center',
+        <div key={i} onClick={() => openWiki(p.name)} style={{
+          padding: 14, background: THEME.surface,
+          borderRadius: THEME.radiusSm, boxShadow: THEME.shadow,
+          cursor: p.name ? 'pointer' : 'default',
         }}>
-          <FloraImage plant={p} size={64} rounded={THEME.radiusTight} />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontFamily: FONTS.heading, fontSize: 20, fontWeight: 500, lineHeight: 1.1 }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+            <div style={{ fontFamily: FONTS.heading, fontSize: 19, fontWeight: 500, lineHeight: 1.1 }}>
               {p.common}
             </div>
-            <div style={{ fontSize: 12, fontStyle: 'italic', color: THEME.inkMuted, marginTop: 1 }}>
+            {p.name && (
+              <div style={{ fontSize: 11, color: THEME.accentDeep, fontWeight: 600, flexShrink: 0 }}>
+                Wiki ↗
+              </div>
+            )}
+          </div>
+          {p.name && (
+            <div style={{ fontSize: 12, fontStyle: 'italic', color: THEME.inkMuted, marginTop: 2 }}>
               {p.name}
             </div>
-            <div style={{ fontSize: 11, color: THEME.inkMuted, marginTop: 4 }}>
-              Differs by: {p.leafShape} leaves · {p.family}
+          )}
+          {p.differentiator && (
+            <div style={{ fontSize: 13, color: THEME.ink, marginTop: 8, lineHeight: 1.45 }}>
+              <span style={{ fontWeight: 600, color: THEME.accentDeep }}>How to tell apart: </span>
+              {p.differentiator}
             </div>
-          </div>
-          <IconChevR size={18} stroke={THEME.inkMuted} />
+          )}
         </div>
       ))}
     </div>
@@ -2154,7 +2216,7 @@ function JournalScreen({ entries, loaded, onBack, onSelect, onDeleted, setToast 
                   <div style={{ fontFamily: FONTS.heading, fontSize: 22, fontWeight: 500, lineHeight: 1.05 }}>
                     {plant.common}
                   </div>
-                  <div style={{ fontSize: 11, color: THEME.inkMuted, flexShrink: 0, marginLeft: 8 }}>{j.date}</div>
+                  <div style={{ fontSize: 11, color: THEME.inkMuted, flexShrink: 0, marginLeft: 8 }}>{formatEntryTime(j)}</div>
                 </div>
                 <div style={{ fontSize: 11, fontStyle: 'italic', color: THEME.inkMuted }}>
                   {plant.name}
@@ -2186,7 +2248,7 @@ function JournalScreen({ entries, loaded, onBack, onSelect, onDeleted, setToast 
                 )}
               </div>
               <button onClick={(e) => { e.stopPropagation(); if (confirm(`Remove "${plant.common}" from your journal?`)) removeEntry(j.id); }} aria-label="Delete entry" style={{
-                position: 'absolute', top: 8, right: 8,
+                position: 'absolute', bottom: 8, right: 8,
                 width: 32, height: 32, borderRadius: '50%',
                 background: THEME.bg, boxShadow: THEME.shadow,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -2224,74 +2286,75 @@ function StatBox({ label, value }) {
      SCREEN — MAP
      ============================================================ -->
 <script type="text/babel">
+// Per-category emoji + ring colour for map markers.
+const MAP_MARKER_BY_CATEGORY = {
+  tree:      { emoji: '🌳', color: '#3a7d44' },
+  shrub:     { emoji: '🌿', color: '#5a9b6e' },
+  flower:    { emoji: '🌸', color: '#d65a8a' },
+  grass:     { emoji: '🌾', color: '#b09a3e' },
+  fern:      { emoji: '🪴', color: '#4a7c5a' },
+  succulent: { emoji: '🌵', color: '#5a8a4a' },
+  vine:      { emoji: '🍃', color: '#6aa168' },
+  fungus:    { emoji: '🍄', color: '#b04a3a' },
+  lichen:    { emoji: '🪨', color: '#7c8a85' },
+  moss:      { emoji: '🌱', color: '#4f9c5e' },
+  other:     { emoji: '📍', color: '#6b7b63' },
+};
+
+function buildEntryIcon(entry) {
+  const cat = (entry?.plant?.category || entry?.category || 'other').toLowerCase();
+  const m = MAP_MARKER_BY_CATEGORY[cat] || MAP_MARKER_BY_CATEGORY.other;
+  return L.divIcon({
+    className: 'flora-marker',
+    html: `<div style="width:38px;height:38px;background:#fff;border:3px solid ${m.color};border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 3px 8px rgba(0,0,0,0.35);font-size:20px;line-height:1">${m.emoji}</div>`,
+    iconSize: [38, 38],
+    iconAnchor: [19, 19],
+    popupAnchor: [0, -20],
+  });
+}
+
+function buildUserIcon() {
+  return L.divIcon({
+    className: 'flora-user-marker',
+    html: `<div style="position:relative;width:18px;height:18px"><div style="position:absolute;inset:0;background:#1976d2;border:3px solid #fff;border-radius:50%;box-shadow:0 0 0 6px rgba(25,118,210,0.18)"></div></div>`,
+    iconSize: [18, 18],
+    iconAnchor: [9, 9],
+  });
+}
+
 function MapScreen({ entries = [], onBack, onSelect }) {
   const mapRef = React.useRef(null);
   const mapInstance = React.useRef(null);
-  const withCoords = entries.filter(e =>
-    e.coords && typeof e.coords.lat === 'number' && typeof e.coords.lng === 'number'
-  );
+  const entryLayer = React.useRef(null);
+  const userMarker = React.useRef(null);
+  const userLatLng = React.useRef(null);
+  const fittedOnce = React.useRef(false);
 
+  const withCoords = React.useMemo(() => entries.filter(e =>
+    e.coords && typeof e.coords.lat === 'number' && typeof e.coords.lng === 'number'
+  ), [entries]);
+
+  // Effect 1: initialise the map once.
   React.useEffect(() => {
     if (!mapRef.current || mapInstance.current) return;
     if (typeof L === 'undefined') return;
 
     L.Icon.Default.imagePath = 'https://unpkg.com/leaflet@1.9.4/dist/images/';
-
-    const map = L.map(mapRef.current, {
-      zoomControl: true,
-      attributionControl: true,
-    }).setView([20, 0], 2);
-
+    const map = L.map(mapRef.current, { zoomControl: true, attributionControl: true })
+      .setView([20, 0], 2);
     L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
     }).addTo(map);
-
     mapInstance.current = map;
+    entryLayer.current = L.layerGroup().addTo(map);
 
     // Leaflet needs the container to have real dimensions before tiles paint
-    // and touch handlers bind correctly. Force a recalc after layout settles.
+    // and touch handlers bind correctly.
     const invalidate = () => map.invalidateSize();
-    const raf = requestAnimationFrame(() => {
-      invalidate();
-      setTimeout(invalidate, 120);
-    });
+    const raf = requestAnimationFrame(() => { invalidate(); setTimeout(invalidate, 120); });
     window.addEventListener('resize', invalidate);
     window.addEventListener('orientationchange', invalidate);
-
-    if (withCoords.length) {
-      const group = L.featureGroup();
-      withCoords.forEach((e) => {
-        const marker = L.marker([e.coords.lat, e.coords.lng]);
-        const name = (e.plant?.common || 'Unknown').replace(/</g, '&lt;');
-        const sci = (e.plant?.name || '').replace(/</g, '&lt;');
-        const date = (e.date || '').replace(/</g, '&lt;');
-        const img = e.photoUrl
-          ? `<div style="width:180px;height:110px;background:#000 center/cover url(${e.photoUrl});border-radius:6px;margin-bottom:6px"></div>`
-          : '';
-        const html = `
-          ${img}
-          <div style="font-weight:700;font-size:14px">${name}</div>
-          <div style="font-style:italic;color:#6b7b63;font-size:12px">${sci}</div>
-          <div style="font-size:11px;margin-top:4px;color:#6b7b63">${date}</div>
-          <button data-entry-id="${e.id}" style="margin-top:8px;padding:6px 12px;border:none;background:#3d5a40;color:#fff;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;width:100%">Open →</button>
-        `;
-        marker.bindPopup(L.popup({ maxWidth: 200 }).setContent(html));
-        marker.on('popupopen', () => {
-          const btn = document.querySelector(`button[data-entry-id="${e.id}"]`);
-          if (btn) btn.addEventListener('click', () => onSelect(e), { once: true });
-        });
-        marker.addTo(group);
-      });
-      group.addTo(map);
-      try { map.fitBounds(group.getBounds().pad(0.25), { maxZoom: 15 }); } catch (err) {}
-    } else if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => map.setView([pos.coords.latitude, pos.coords.longitude], 13),
-        () => {},
-        { timeout: 8000, maximumAge: 10 * 60 * 1000 }
-      );
-    }
 
     return () => {
       cancelAnimationFrame(raf);
@@ -2299,7 +2362,73 @@ function MapScreen({ entries = [], onBack, onSelect }) {
       window.removeEventListener('orientationchange', invalidate);
       map.remove();
       mapInstance.current = null;
+      entryLayer.current = null;
+      userMarker.current = null;
     };
+  }, []);
+
+  // Effect 2: render entry markers whenever entries change.
+  React.useEffect(() => {
+    const map = mapInstance.current;
+    const layer = entryLayer.current;
+    if (!map || !layer) return;
+    layer.clearLayers();
+
+    withCoords.forEach((e) => {
+      const marker = L.marker([e.coords.lat, e.coords.lng], { icon: buildEntryIcon(e) });
+      const name = (e.plant?.common || 'Unknown').replace(/</g, '&lt;');
+      const sci = (e.plant?.name || '').replace(/</g, '&lt;');
+      const date = formatEntryTime(e).replace(/</g, '&lt;');
+      const img = e.photoUrl
+        ? `<div style="width:180px;height:110px;background:#000 center/cover url(${e.photoUrl});border-radius:6px;margin-bottom:6px"></div>`
+        : '';
+      const html = `
+        ${img}
+        <div style="font-weight:700;font-size:14px">${name}</div>
+        <div style="font-style:italic;color:#6b7b63;font-size:12px">${sci}</div>
+        <div style="font-size:11px;margin-top:4px;color:#6b7b63">${date}</div>
+        <button data-entry-id="${e.id}" style="margin-top:8px;padding:6px 12px;border:none;background:#3d5a40;color:#fff;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;width:100%">Open →</button>
+      `;
+      marker.bindPopup(L.popup({ maxWidth: 220 }).setContent(html));
+      marker.on('popupopen', () => {
+        const btn = document.querySelector(`button[data-entry-id="${e.id}"]`);
+        if (btn) btn.addEventListener('click', () => onSelect(e), { once: true });
+      });
+      marker.addTo(layer);
+    });
+
+    // Auto-fit on the first time we get markers.
+    if (!fittedOnce.current && withCoords.length) {
+      try {
+        const group = L.featureGroup(layer.getLayers());
+        map.fitBounds(group.getBounds().pad(0.25), { maxZoom: 15 });
+        fittedOnce.current = true;
+      } catch {}
+    }
+  }, [withCoords, onSelect]);
+
+  // Effect 3: try to plot the user's current location (independent of entries).
+  React.useEffect(() => {
+    if (!navigator.geolocation) return;
+    let cancelled = false;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        if (cancelled || !mapInstance.current) return;
+        userLatLng.current = [pos.coords.latitude, pos.coords.longitude];
+        if (userMarker.current) userMarker.current.remove();
+        userMarker.current = L.marker(userLatLng.current, { icon: buildUserIcon(), zIndexOffset: 1000 })
+          .bindPopup('You are here')
+          .addTo(mapInstance.current);
+        // If the entries effect hasn't already auto-fitted (e.g. no pinned
+        // discoveries yet, or geo resolved first), centre on the user.
+        if (!fittedOnce.current) {
+          mapInstance.current.setView(userLatLng.current, 14);
+        }
+      },
+      (err) => console.warn('[Flora] map geolocation failed', err),
+      { timeout: 10000, maximumAge: 5 * 60 * 1000, enableHighAccuracy: true }
+    );
+    return () => { cancelled = true; };
   }, []);
 
   return (
@@ -2388,7 +2517,11 @@ function normaliseMatch(m) {
     },
     nearby: m.nearby ?? null,
     tags: m.tags || [],
-    similarDetail: [],
+    similarDetail: Array.isArray(m.similar) ? m.similar.map(s => ({
+      common: s.common_name || s.common || s.scientific_name || 'Unknown',
+      name: s.scientific_name || s.name || '',
+      differentiator: s.differentiator || s.why || '',
+    })) : [],
   };
   return {
     plant,
@@ -2435,9 +2568,12 @@ function FloraApp() {
 
   const recentCount = journalEntries.length;
 
-  const startScan = (dataUrl) => {
+  const [scanPart, setScanPart] = React.useState(null);
+
+  const startScan = (dataUrl, part) => {
     setPhotoUrl(dataUrl);
     setMatches([]);
+    setScanPart(part || null);
     setScreen('scan');
   };
 
@@ -2453,7 +2589,7 @@ function FloraApp() {
   };
 
   const onSaveMatch = async (match) => {
-    const date = new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    const date = new Date().toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
     // Optimistic entry so the journal updates instantly. The real server
     // entry replaces this one on success, or we roll it back on failure.
     const tempId = 'tmp-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -2534,6 +2670,7 @@ function FloraApp() {
       {screen === 'scan' && (
         <ScanScreen
           photoUrl={photoUrl}
+          part={scanPart}
           onComplete={onScanComplete}
           onError={onScanError}
         />

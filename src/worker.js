@@ -41,10 +41,19 @@ Schema:
         "humidity": "string",
         "temperature": "string (e.g. '18–27°C')"
       },
-      "tags": ["short", "tags", "like", "Houseplant", "Flowering", "Drought-tolerant"]
+      "tags": ["short", "tags", "like", "Houseplant", "Flowering", "Drought-tolerant"],
+      "similar": [
+        {
+          "common_name": "string",
+          "scientific_name": "string",
+          "differentiator": "one short sentence on how this differs from the main match — focus on a feature the user can actually check (leaf shape, flower colour, habitat, smell, gill colour, etc)"
+        }
+      ]
     }
   ]
 }
+
+The "similar" array should hold up to 3 plausible look-alikes — species in the same genus, family or with similar visual silhouette. For fungi this MUST include known toxic look-alikes when relevant. Skip the field if you genuinely cannot name any.
 
 Category guidance:
 - tree: woody, single dominant trunk, typically >4m at maturity
@@ -96,6 +105,14 @@ async function identify(request, env) {
     return json({ error: 'Server not configured: missing ANTHROPIC_API_KEY' }, 500);
   }
 
+  // Optional hint about which part of the subject the photo shows. Helps
+  // disambiguate when the visible features don't uniquely identify the species.
+  const ALLOWED_PARTS = ['whole', 'leaf', 'flower', 'bark'];
+  const part = ALLOWED_PARTS.includes(body?.part) ? body.part : null;
+  const partHint = part
+    ? ` The user has indicated this image shows the ${part === 'whole' ? 'whole subject' : part}.`
+    : '';
+
   const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -112,7 +129,7 @@ async function identify(request, env) {
           role: 'user',
           content: [
             { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
-            { type: 'text', text: 'Identify the subject (plant, fungus, lichen or moss). Return JSON only per the schema in the system prompt.' },
+            { type: 'text', text: `Identify the subject (plant, fungus, lichen or moss).${partHint} Return JSON only per the schema in the system prompt.` },
           ],
         },
       ],
