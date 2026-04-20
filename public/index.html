@@ -43,6 +43,23 @@
 <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+<script>
+  // On-device console overlay. Enable with ?debug=1 (or ?debug=eruda).
+  // Persists in sessionStorage so it survives navigation within the app.
+  (function () {
+    try {
+      var url = new URL(window.location.href);
+      var wantsDebug = url.searchParams.has('debug') || sessionStorage.getItem('flora_debug') === '1';
+      if (url.searchParams.has('debug')) sessionStorage.setItem('flora_debug', '1');
+      if (url.searchParams.get('debug') === 'off') { sessionStorage.removeItem('flora_debug'); return; }
+      if (!wantsDebug) return;
+      var s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/eruda@3.4.1/eruda.min.js';
+      s.onload = function () { try { window.eruda && window.eruda.init(); } catch (e) {} };
+      document.head.appendChild(s);
+    } catch (e) {}
+  })();
+</script>
 </head>
 <body>
 <div id="root"></div>
@@ -297,6 +314,7 @@ const IconPin = (p) => <Icon {...p} d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118
 const IconBookmark = (p) => <Icon {...p} d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z" />;
 const IconPlus = (p) => <Icon {...p} d="M12 5v14M5 12h14" />;
 const IconChevR = (p) => <Icon {...p} d="M9 18l6-6-6-6" />;
+const IconTrash = (p) => <Icon {...p} d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6M10 11v6M14 11v6" />;
 </script>
 
 <!-- ============================================================
@@ -465,6 +483,21 @@ function NearbyCard({ plant, onClick }) {
   );
 }
 
+function CategoryChip({ category, size = 'sm' }) {
+  if (!category) return null;
+  const label = (typeof CATEGORY_LABEL !== 'undefined' && CATEGORY_LABEL[category]) || category;
+  const fontSize = size === 'sm' ? 9 : 10;
+  const padding = size === 'sm' ? '2px 7px' : '3px 9px';
+  return (
+    <span style={{
+      fontSize, fontWeight: 700, letterSpacing: 0.6, textTransform: 'uppercase',
+      padding, borderRadius: 999,
+      background: THEME.accentSoft, color: THEME.accentDeep,
+      display: 'inline-block', whiteSpace: 'nowrap',
+    }}>{label}</span>
+  );
+}
+
 function JournalRow({ entry }) {
   const plant = entry.plant || plantById(entry.plantId);
   if (!plant) return null;
@@ -475,14 +508,17 @@ function JournalRow({ entry }) {
     }}>
       <FloraImage plant={plant} size={48} rounded={THEME.radiusTight} photoUrl={entry.photoUrl} />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-          <div style={{ fontFamily: FONTS.heading, fontSize: 18, fontWeight: 500 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 6 }}>
+          <div style={{ fontFamily: FONTS.heading, fontSize: 18, fontWeight: 500, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {plant.common}
           </div>
-          <div style={{ fontSize: 11, color: THEME.inkMuted }}>{entry.date}</div>
+          <div style={{ fontSize: 11, color: THEME.inkMuted, flexShrink: 0 }}>{entry.date}</div>
         </div>
-        <div style={{ fontSize: 12, color: THEME.inkMuted, marginTop: 2 }}>
-          {entry.location}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
+          <CategoryChip category={plant.category} />
+          <div style={{ fontSize: 12, color: THEME.inkMuted, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {entry.location}
+          </div>
         </div>
       </div>
     </div>
@@ -539,21 +575,79 @@ function saveCameraId(id) {
   try { id ? localStorage.setItem(CAM_PREF_KEY, id) : localStorage.removeItem(CAM_PREF_KEY); } catch {}
 }
 
-// Journal persistence
-const JOURNAL_KEY = 'flora:journal:v1';
-function loadJournal() {
-  try { return JSON.parse(localStorage.getItem(JOURNAL_KEY) || '[]'); }
-  catch { return []; }
+// Journal persistence — backed by Cloudflare D1 + R2.
+// Device ID is an anonymous client-generated key that scopes what this
+// device can read / write / delete. Stored only in localStorage.
+
+const DEVICE_ID_KEY = 'flora:device_id:v1';
+function getDeviceId() {
+  let id = null;
+  try { id = localStorage.getItem(DEVICE_ID_KEY); } catch {}
+  if (!id) {
+    id = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : 'd-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 14);
+    try { localStorage.setItem(DEVICE_ID_KEY, id); } catch {}
+  }
+  return id;
 }
-function saveJournal(entries) {
-  try { localStorage.setItem(JOURNAL_KEY, JSON.stringify(entries)); } catch {}
+
+// Downscale a base64 image data URL to at most `maxDim` on the longer edge
+// and re-encode as JPEG. Typical ~2 MB phone photo collapses to ~80–150 KB,
+// well under the server's MAX_PHOTO_BYTES cap.
+function downscalePhoto(dataUrl, maxDim = 1024, quality = 0.72) {
+  return new Promise((resolve, reject) => {
+    if (!dataUrl) return resolve(null);
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
+      const w = Math.max(1, Math.round(img.naturalWidth * scale));
+      const h = Math.max(1, Math.round(img.naturalHeight * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+      try { resolve(canvas.toDataURL('image/jpeg', quality)); }
+      catch (e) { reject(e); }
+    };
+    img.onerror = () => reject(new Error('Image decode failed'));
+    img.src = dataUrl;
+  });
 }
-function addJournalEntry(entry) {
-  const entries = loadJournal();
-  entries.unshift({ ...entry, id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6) });
-  // Cap at 50 to keep localStorage small
-  saveJournal(entries.slice(0, 50));
-  return entries;
+
+async function apiSaveEntry({ plant, photoUrl, date, location, coords, note }) {
+  const device_id = getDeviceId();
+  const image = photoUrl ? await downscalePhoto(photoUrl) : null;
+  const res = await fetch('/api/journal', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device_id, plant, date, location, coords, note, image }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Save failed (${res.status})`);
+  }
+  return res.json();
+}
+
+async function apiListEntries() {
+  const device_id = getDeviceId();
+  const res = await fetch(`/api/journal?device_id=${encodeURIComponent(device_id)}`);
+  if (!res.ok) throw new Error(`Load failed (${res.status})`);
+  const data = await res.json();
+  return Array.isArray(data.entries) ? data.entries : [];
+}
+
+async function apiDeleteEntry(id) {
+  const device_id = getDeviceId();
+  const res = await fetch(`/api/journal/${encodeURIComponent(id)}?device_id=${encodeURIComponent(device_id)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Delete failed (${res.status})`);
+  }
+  return res.json();
 }
 </script>
 
@@ -561,7 +655,7 @@ function addJournalEntry(entry) {
      SCREEN — HOME (camera capture)
      ============================================================ -->
 <script type="text/babel">
-function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
+function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEntries, onSelectPlant }) {
   const [capturing, setCapturing] = React.useState(false);
   const [sheetOpen, setSheetOpen] = React.useState(false);
   const [dragDelta, setDragDelta] = React.useState(0);
@@ -569,7 +663,7 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
   const [nearby, setNearby] = React.useState(null); // null = loading, [] = empty/denied, [...] = data
   const [nearbyErr, setNearbyErr] = React.useState(null);
   const fileRef = React.useRef(null);
-  const recentJournal = React.useMemo(() => loadJournal().slice(0, 3), [sheetOpen]);
+  const recentJournal = recentEntries || [];
 
   const onHandleTouchStart = (e) => {
     dragStartY.current = e.touches[0].clientY;
@@ -980,14 +1074,14 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
             </div>
           </button>
 
-          <div style={{
+          <button onClick={onOpenMap} aria-label="Open discoveries map" style={{
             width: 48, height: 48, borderRadius: THEME.radiusSm,
             background: THEME.surface, boxShadow: THEME.shadow,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             cursor: 'pointer',
           }}>
             <IconMap size={20} stroke={THEME.ink} />
-          </div>
+          </button>
         </div>
 
         <div style={{
@@ -1064,7 +1158,7 @@ function HomeScreen({ onCapture, onOpenJournal, recentCount, onSelectPlant }) {
 function ScanScreen({ photoUrl, onComplete, onError }) {
   const [progress, setProgress] = React.useState(0);
   const [detected, setDetected] = React.useState([]);
-  const [statusLabel, setStatusLabel] = React.useState('Reading leaf shape…');
+  const [statusLabel, setStatusLabel] = React.useState('Reading shape, colour, texture…');
 
   React.useEffect(() => {
     let cancelled = false;
@@ -1081,8 +1175,8 @@ function ScanScreen({ photoUrl, onComplete, onError }) {
       if (t >= 0.55 && detected.length < 2) setDetected([PLANTS[0].id, PLANTS[2].id]);
       if (t >= 0.8 && detected.length < 3) setDetected([PLANTS[0].id, PLANTS[2].id, PLANTS[1].id]);
       setStatusLabel(
-        t < 0.35 ? 'Reading leaf shape…'
-          : t < 0.65 ? 'Matching venation…'
+        t < 0.35 ? 'Reading shape, colour, texture…'
+          : t < 0.65 ? 'Thumbing the field guide…'
             : t < 0.9 ? 'Narrowing to species…'
               : 'Almost there.'
       );
@@ -1119,9 +1213,9 @@ function ScanScreen({ photoUrl, onComplete, onError }) {
   }, []);
 
   const matches = [
-    { id: 'monstera', label: 'Aroid family', angle: -60 },
-    { id: 'fern', label: 'Leaf texture', angle: 40 },
-    { id: 'lavender', label: 'Vein pattern', angle: 140 },
+    { id: 'monstera', label: 'Family match', angle: -60 },
+    { id: 'fern', label: 'Surface texture', angle: 40 },
+    { id: 'lavender', label: 'Silhouette', angle: 140 },
   ];
 
   return (
@@ -1244,9 +1338,114 @@ function ScanScreen({ photoUrl, onComplete, onError }) {
      SCREEN — RESULTS
      ============================================================ -->
 <script type="text/babel">
+function useWikipediaSummary(scientificName, commonName, enabled) {
+  const [state, setState] = React.useState({ loading: false, data: null, error: null });
+  React.useEffect(() => {
+    if (!enabled) { setState({ loading: false, data: null, error: null }); return; }
+    let cancelled = false;
+    const fetchSummary = async (title) => {
+      const res = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`, { headers: { Accept: 'application/json' } });
+      if (!res.ok) return null;
+      const d = await res.json();
+      if (d.type === 'disambiguation' || !d.extract) return null;
+      return d;
+    };
+    (async () => {
+      setState({ loading: true, data: null, error: null });
+      try {
+        let data = scientificName ? await fetchSummary(scientificName) : null;
+        if (!data && commonName) data = await fetchSummary(commonName);
+        if (cancelled) return;
+        if (!data) setState({ loading: false, data: null, error: 'No Wikipedia article found for this species.' });
+        else setState({ loading: false, data, error: null });
+      } catch (e) {
+        if (!cancelled) setState({ loading: false, data: null, error: e.message || 'Fetch failed' });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [scientificName, commonName, enabled]);
+  return state;
+}
+
+function WikipediaVerifySheet({ open, onClose, plant, photoUrl }) {
+  const { loading, data, error } = useWikipediaSummary(plant?.name, plant?.common, open);
+  if (!open) return null;
+  const wikiImg = data?.originalimage?.source || data?.thumbnail?.source || null;
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)',
+      display: 'flex', alignItems: 'flex-end', zIndex: 100,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        width: '100%', maxHeight: '92%', background: THEME.bg,
+        borderTopLeftRadius: 24, borderTopRightRadius: 24,
+        padding: '16px 18px calc(18px + env(safe-area-inset-bottom))',
+        overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 12,
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ fontFamily: FONTS.heading, fontSize: 22, fontWeight: 500 }}>Verify match</div>
+          <button onClick={onClose} style={{
+            width: 34, height: 34, borderRadius: '50%', border: 'none',
+            background: THEME.surface, fontSize: 20, lineHeight: 1, cursor: 'pointer',
+          }}>×</button>
+        </div>
+        <div style={{ fontSize: 13, color: THEME.inkMuted }}>
+          Compare your photo with Wikipedia's reference for <i>{plant?.name}</i>. If they look different, try another match.
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <div>
+            <div style={{ fontSize: 10, color: THEME.inkMuted, fontWeight: 700, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.8 }}>Your photo</div>
+            <div style={{
+              width: '100%', aspectRatio: '1 / 1', borderRadius: THEME.radiusSm,
+              background: photoUrl ? `#000 center/cover url(${photoUrl})` : THEME.surface,
+              boxShadow: THEME.shadow,
+            }} />
+          </div>
+          <div>
+            <div style={{ fontSize: 10, color: THEME.inkMuted, fontWeight: 700, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.8 }}>Wikipedia</div>
+            <div style={{
+              width: '100%', aspectRatio: '1 / 1', borderRadius: THEME.radiusSm,
+              background: wikiImg ? `#000 center/cover url(${wikiImg})` : THEME.surface,
+              boxShadow: THEME.shadow,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: THEME.inkMuted, fontSize: 11, padding: 10, textAlign: 'center',
+            }}>
+              {loading && 'Loading…'}
+              {!loading && !wikiImg && (error || 'No reference photo')}
+            </div>
+          </div>
+        </div>
+        {data && (
+          <div style={{
+            background: THEME.surface, borderRadius: THEME.radiusSm,
+            padding: 14, boxShadow: THEME.shadow,
+          }}>
+            <div style={{ fontFamily: FONTS.heading, fontSize: 17, fontWeight: 500 }}>{data.title}</div>
+            {data.description && <div style={{ fontSize: 12, color: THEME.inkMuted, marginTop: 2 }}>{data.description}</div>}
+            <div style={{ fontSize: 14, lineHeight: 1.45, marginTop: 8 }}>{data.extract}</div>
+            {data.content_urls?.desktop?.page && (
+              <a href={data.content_urls.desktop.page} target="_blank" rel="noopener noreferrer" style={{
+                display: 'inline-block', marginTop: 10,
+                color: THEME.accentDeep, fontSize: 13, fontWeight: 600, textDecoration: 'none',
+              }}>Read on Wikipedia ↗</a>
+            )}
+          </div>
+        )}
+        {!loading && !data && error && (
+          <div style={{
+            background: THEME.surface, borderRadius: THEME.radiusSm,
+            padding: 14, boxShadow: THEME.shadow, fontSize: 13, color: THEME.inkMuted,
+          }}>{error}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ResultsScreen({ photoUrl, matches, onBack, onSelect, onSave }) {
   const [idx, setIdx] = React.useState(0);
   const [saved, setSaved] = React.useState(false);
+  const [verifyOpen, setVerifyOpen] = React.useState(false);
   const safeMatches = matches && matches.length ? matches : [];
   const current = safeMatches[idx];
 
@@ -1332,8 +1531,19 @@ function ResultsScreen({ photoUrl, matches, onBack, onSelect, onSave }) {
             background: 'linear-gradient(180deg, transparent, rgba(0,0,0,0.75))',
             color: '#fff',
           }}>
-            <div style={{ fontSize: 11, opacity: 0.9, textTransform: 'uppercase', letterSpacing: 1.2, fontWeight: 600 }}>
-              Best match
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ fontSize: 11, opacity: 0.9, textTransform: 'uppercase', letterSpacing: 1.2, fontWeight: 600 }}>
+                Best match
+              </div>
+              {current.plant.category && (
+                <div style={{
+                  fontSize: 10, fontWeight: 700, letterSpacing: 0.8, textTransform: 'uppercase',
+                  padding: '3px 8px', borderRadius: 999,
+                  background: 'rgba(255,255,255,0.18)', border: '1px solid rgba(255,255,255,0.35)',
+                }}>
+                  {CATEGORY_LABEL[current.plant.category] || current.plant.category}
+                </div>
+              )}
             </div>
             <div style={{ fontFamily: FONTS.heading, fontSize: 34, fontWeight: 500, lineHeight: 1.05, marginTop: 2 }}>
               {current.plant.common}
@@ -1362,6 +1572,30 @@ function ResultsScreen({ photoUrl, matches, onBack, onSelect, onSave }) {
             </div>
           </button>
         ))}
+      </div>
+
+      {current.plant.category === 'fungus' && (
+        <div style={{ padding: '0 20px 10px', flexShrink: 0 }}>
+          <div style={{
+            padding: '10px 12px', borderRadius: THEME.radiusSm,
+            background: '#FFE5E0', color: '#7A1F10', border: '1px solid #F3B7A9',
+            fontSize: 12, lineHeight: 1.4, fontWeight: 600,
+          }}>
+            ⚠ Never eat a wild mushroom based on an AI ID. Many edible species have deadly lookalikes.
+          </div>
+        </div>
+      )}
+
+      <div style={{ padding: '0 20px 10px', flexShrink: 0 }}>
+        <button onClick={() => setVerifyOpen(true)} style={{
+          width: '100%', padding: '12px 14px', borderRadius: THEME.radiusSm,
+          background: THEME.accentSoft, color: THEME.accentDeep, border: 'none',
+          fontWeight: 700, fontSize: 13, cursor: 'pointer',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+          letterSpacing: 0.3,
+        }}>
+          Verify on Wikipedia ↗
+        </button>
       </div>
 
       <div style={{ padding: '8px 20px', flex: 1, overflow: 'auto' }}>
@@ -1407,6 +1641,13 @@ function ResultsScreen({ photoUrl, matches, onBack, onSelect, onSave }) {
           fontWeight: 700, fontSize: 15,
         }}>Full profile →</button>
       </div>
+
+      <WikipediaVerifySheet
+        open={verifyOpen}
+        onClose={() => setVerifyOpen(false)}
+        plant={current.plant}
+        photoUrl={photoUrl}
+      />
     </div>
   );
 }
@@ -1416,9 +1657,18 @@ function ResultsScreen({ photoUrl, matches, onBack, onSelect, onSave }) {
      SCREEN — DETAIL
      ============================================================ -->
 <script type="text/babel">
-function DetailScreen({ plant, photoUrl, onBack }) {
+function DetailScreen({ plant, photoUrl, onBack, journalId, onDelete }) {
   const [tab, setTab] = React.useState('overview');
+  const [deleting, setDeleting] = React.useState(false);
   if (!plant) return null;
+
+  const handleDelete = async () => {
+    if (deleting) return;
+    if (!confirm(`Remove "${plant.common}" from your journal?`)) return;
+    setDeleting(true);
+    try { await onDelete(journalId); }
+    catch (e) { setDeleting(false); alert('Delete failed: ' + e.message); }
+  };
 
   return (
     <div style={{
@@ -1444,11 +1694,20 @@ function DetailScreen({ plant, photoUrl, onBack }) {
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             backdropFilter: 'blur(10px)',
           }}><IconBack size={18} stroke={THEME.ink} /></button>
-          <button style={{
-            width: 40, height: 40, borderRadius: '50%',
-            background: 'rgba(255,255,255,0.9)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}><IconBookmark size={18} stroke={THEME.ink} /></button>
+          {journalId ? (
+            <button onClick={handleDelete} disabled={deleting} aria-label="Delete from journal" style={{
+              width: 40, height: 40, borderRadius: '50%',
+              background: 'rgba(255,255,255,0.9)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              opacity: deleting ? 0.5 : 1,
+            }}><IconTrash size={18} stroke="#B3261E" /></button>
+          ) : (
+            <button style={{
+              width: 40, height: 40, borderRadius: '50%',
+              background: 'rgba(255,255,255,0.9)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}><IconBookmark size={18} stroke={THEME.ink} /></button>
+          )}
         </div>
         <div style={{
           position: 'absolute', bottom: 16, left: 20, right: 20, color: '#fff',
@@ -1762,14 +2021,24 @@ function SimilarTab({ plant }) {
      SCREEN — JOURNAL
      ============================================================ -->
 <script type="text/babel">
-const FILTERS = ['All', 'Pet safe', 'Flowering now', 'Toxic'];
+const FILTERS = [
+  'All', 'Pet safe', 'Flowering now', 'Toxic',
+  'Trees', 'Shrubs', 'Flowers', 'Fungi', 'Succulents', 'Ferns', 'Grasses', 'Vines', 'Mosses', 'Lichens',
+];
+const FILTER_TO_CATEGORY = {
+  Trees: 'tree', Shrubs: 'shrub', Flowers: 'flower', Fungi: 'fungus',
+  Succulents: 'succulent', Ferns: 'fern', Grasses: 'grass', Vines: 'vine',
+  Mosses: 'moss', Lichens: 'lichen',
+};
 
 function applyJournalFilter(entries, filter) {
   if (filter === 'All') return entries;
   const currentMonth = new Date().getMonth() + 1;
+  const wantCategory = FILTER_TO_CATEGORY[filter];
   return entries.filter(e => {
     const plant = e.plant || plantById(e.plantId);
     if (!plant) return false;
+    if (wantCategory) return (plant.category || 'other') === wantCategory;
     if (filter === 'Pet safe') return plant.toxicity?.level === 'safe';
     if (filter === 'Toxic') {
       const t = plant.toxicity?.level;
@@ -1783,14 +2052,16 @@ function applyJournalFilter(entries, filter) {
   });
 }
 
-function JournalScreen({ onBack, onSelect }) {
-  const [entries, setEntries] = React.useState(() => loadJournal());
+function JournalScreen({ entries, loaded, onBack, onSelect, onDeleted, setToast }) {
   const [filter, setFilter] = React.useState('All');
 
-  const removeEntry = (id) => {
-    const next = entries.filter(e => e.id !== id);
-    setEntries(next);
-    saveJournal(next);
+  const removeEntry = async (id) => {
+    try {
+      await apiDeleteEntry(id);
+      if (onDeleted) onDeleted();
+    } catch (e) {
+      if (setToast) setToast(`Delete failed: ${e.message}`);
+    }
   };
 
   const filtered = applyJournalFilter(entries, filter);
@@ -1849,7 +2120,12 @@ function JournalScreen({ onBack, onSelect }) {
       </div>
 
       <div style={{ flex: 1, overflow: 'auto', padding: '0 16px calc(20px + env(safe-area-inset-bottom))' }}>
-        {entries.length === 0 ? (
+        {!loaded ? (
+          <div style={{
+            textAlign: 'center', color: THEME.inkMuted, fontSize: 14,
+            padding: '40px 20px',
+          }}>Loading your journal…</div>
+        ) : entries.length === 0 ? (
           <div style={{
             textAlign: 'center', color: THEME.inkMuted, fontSize: 14,
             padding: '40px 20px', lineHeight: 1.5,
@@ -1909,13 +2185,14 @@ function JournalScreen({ onBack, onSelect }) {
                   </div>
                 )}
               </div>
-              <button onClick={(e) => { e.stopPropagation(); if (confirm('Remove this entry?')) removeEntry(j.id); }} aria-label="Remove entry" style={{
+              <button onClick={(e) => { e.stopPropagation(); if (confirm(`Remove "${plant.common}" from your journal?`)) removeEntry(j.id); }} aria-label="Delete entry" style={{
                 position: 'absolute', top: 8, right: 8,
-                width: 28, height: 28, borderRadius: '50%',
+                width: 32, height: 32, borderRadius: '50%',
+                background: THEME.bg, boxShadow: THEME.shadow,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                color: THEME.inkMuted, fontSize: 18, lineHeight: 1,
-                opacity: 0.4,
-              }}>×</button>
+              }}>
+                <IconTrash size={14} stroke="#B3261E" />
+              </button>
             </div>
           );
         })}
@@ -1944,17 +2221,150 @@ function StatBox({ label, value }) {
 </script>
 
 <!-- ============================================================
+     SCREEN — MAP
+     ============================================================ -->
+<script type="text/babel">
+function MapScreen({ entries = [], onBack, onSelect }) {
+  const mapRef = React.useRef(null);
+  const mapInstance = React.useRef(null);
+  const withCoords = entries.filter(e =>
+    e.coords && typeof e.coords.lat === 'number' && typeof e.coords.lng === 'number'
+  );
+
+  React.useEffect(() => {
+    if (!mapRef.current || mapInstance.current) return;
+    if (typeof L === 'undefined') return;
+
+    L.Icon.Default.imagePath = 'https://unpkg.com/leaflet@1.9.4/dist/images/';
+
+    const map = L.map(mapRef.current, {
+      zoomControl: true,
+      attributionControl: true,
+    }).setView([20, 0], 2);
+
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    }).addTo(map);
+
+    mapInstance.current = map;
+
+    // Leaflet needs the container to have real dimensions before tiles paint
+    // and touch handlers bind correctly. Force a recalc after layout settles.
+    const invalidate = () => map.invalidateSize();
+    const raf = requestAnimationFrame(() => {
+      invalidate();
+      setTimeout(invalidate, 120);
+    });
+    window.addEventListener('resize', invalidate);
+    window.addEventListener('orientationchange', invalidate);
+
+    if (withCoords.length) {
+      const group = L.featureGroup();
+      withCoords.forEach((e) => {
+        const marker = L.marker([e.coords.lat, e.coords.lng]);
+        const name = (e.plant?.common || 'Unknown').replace(/</g, '&lt;');
+        const sci = (e.plant?.name || '').replace(/</g, '&lt;');
+        const date = (e.date || '').replace(/</g, '&lt;');
+        const img = e.photoUrl
+          ? `<div style="width:180px;height:110px;background:#000 center/cover url(${e.photoUrl});border-radius:6px;margin-bottom:6px"></div>`
+          : '';
+        const html = `
+          ${img}
+          <div style="font-weight:700;font-size:14px">${name}</div>
+          <div style="font-style:italic;color:#6b7b63;font-size:12px">${sci}</div>
+          <div style="font-size:11px;margin-top:4px;color:#6b7b63">${date}</div>
+          <button data-entry-id="${e.id}" style="margin-top:8px;padding:6px 12px;border:none;background:#3d5a40;color:#fff;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;width:100%">Open →</button>
+        `;
+        marker.bindPopup(L.popup({ maxWidth: 200 }).setContent(html));
+        marker.on('popupopen', () => {
+          const btn = document.querySelector(`button[data-entry-id="${e.id}"]`);
+          if (btn) btn.addEventListener('click', () => onSelect(e), { once: true });
+        });
+        marker.addTo(group);
+      });
+      group.addTo(map);
+      try { map.fitBounds(group.getBounds().pad(0.25), { maxZoom: 15 }); } catch (err) {}
+    } else if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => map.setView([pos.coords.latitude, pos.coords.longitude], 13),
+        () => {},
+        { timeout: 8000, maximumAge: 10 * 60 * 1000 }
+      );
+    }
+
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('resize', invalidate);
+      window.removeEventListener('orientationchange', invalidate);
+      map.remove();
+      mapInstance.current = null;
+    };
+  }, []);
+
+  return (
+    <div style={{
+      width: '100%', height: '100%', background: THEME.bg,
+      color: THEME.ink, fontFamily: FONTS.body,
+      display: 'flex', flexDirection: 'column', overflow: 'hidden',
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10,
+        padding: `calc(16px + env(safe-area-inset-top)) 16px 10px`,
+        flexShrink: 0,
+      }}>
+        <button onClick={onBack} style={{
+          width: 40, height: 40, borderRadius: '50%',
+          background: THEME.surface, boxShadow: THEME.shadow,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}><IconBack size={18} stroke={THEME.ink} /></button>
+        <div style={{ flex: 1 }}>
+          <div style={{
+            fontFamily: FONTS.heading, fontSize: 32, fontWeight: 500,
+            letterSpacing: -0.3, lineHeight: 1,
+          }}>Discoveries map</div>
+          <div style={{ fontSize: 12, color: THEME.inkMuted, marginTop: 2 }}>
+            {withCoords.length} pinned {withCoords.length === 1 ? 'discovery' : 'discoveries'}
+            {entries.length > withCoords.length && (
+              <span> · {entries.length - withCoords.length} without location</span>
+            )}
+          </div>
+        </div>
+      </div>
+      <div ref={mapRef} style={{ flex: 1, minHeight: 0, width: '100%' }} />
+      {withCoords.length === 0 && (
+        <div style={{
+          padding: '12px 16px calc(16px + env(safe-area-inset-bottom))',
+          background: THEME.surface, boxShadow: `0 -2px 10px rgba(0,0,0,0.05)`,
+          fontSize: 13, color: THEME.inkMuted, textAlign: 'center', flexShrink: 0,
+        }}>
+          {entries.length === 0
+            ? 'Save a discovery to pin it here.'
+            : `${entries.length} entries saved without location. Grant location permission and save a new discovery to start mapping.`}
+        </div>
+      )}
+    </div>
+  );
+}
+</script>
+
+<!-- ============================================================
      APP SHELL
      ============================================================ -->
 <script type="text/babel">
+const VALID_CATEGORIES = ['tree', 'shrub', 'flower', 'grass', 'fern', 'succulent', 'vine', 'fungus', 'lichen', 'moss', 'other'];
+
 function normaliseMatch(m) {
   // Claude returns structured data matching this shape. Defensive defaults for anything missing.
   const tox = (m.toxicity?.level || 'unknown').toLowerCase();
+  const rawCat = (m.category || '').toLowerCase();
+  const category = VALID_CATEGORIES.includes(rawCat) ? rawCat : 'other';
   const plant = {
     id: m.id || (m.name || 'unknown').toLowerCase().replace(/\s+/g, '-'),
     name: m.scientific_name || m.name || 'Unknown species',
     common: m.common_name || m.name || 'Unknown',
     family: m.family || '—',
+    category,
     colors: pickColors(tox),
     photo: 'linear-gradient(135deg, #1f3a28 0%, #2d5a3d 35%, #4a7c5a 70%, #8cb89a 100%)',
     leafShape: pickLeafShape(m.common_name || m.name),
@@ -1986,15 +2396,44 @@ function normaliseMatch(m) {
   };
 }
 
+const CATEGORY_LABEL = {
+  tree: 'Tree', shrub: 'Shrub', flower: 'Flower', grass: 'Grass', fern: 'Fern',
+  succulent: 'Succulent', vine: 'Vine', fungus: 'Fungus', lichen: 'Lichen',
+  moss: 'Moss', other: 'Other',
+};
+
 function FloraApp() {
   const [screen, setScreen] = React.useState('home');
   const [detailReturn, setDetailReturn] = React.useState('results'); // which screen detail should go back to
   const [photoUrl, setPhotoUrl] = React.useState(null);
   const [matches, setMatches] = React.useState([]);
   const [activePlant, setActivePlant] = React.useState(null);
-  const [journalVersion, setJournalVersion] = React.useState(0);
+  const [journalEntries, setJournalEntries] = React.useState([]);
+  const [journalLoaded, setJournalLoaded] = React.useState(false);
+  const [activeJournalId, setActiveJournalId] = React.useState(null);
+  const [toast, setToastRaw] = React.useState(null);
+  const toastTimer = React.useRef(null);
+  const setToast = (msg) => {
+    setToastRaw(msg);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToastRaw(null), 3200);
+  };
 
-  const recentCount = React.useMemo(() => loadJournal().length, [journalVersion]);
+  const refreshJournal = React.useCallback(async () => {
+    try {
+      const list = await apiListEntries();
+      setJournalEntries(list);
+      setJournalLoaded(true);
+    } catch (e) {
+      console.error('[Flora] journal load failed', e);
+      setJournalLoaded(true);
+      setToast(`Couldn't load journal: ${e.message}`);
+    }
+  }, []);
+
+  React.useEffect(() => { refreshJournal(); }, [refreshJournal]);
+
+  const recentCount = journalEntries.length;
 
   const startScan = (dataUrl) => {
     setPhotoUrl(dataUrl);
@@ -2013,24 +2452,67 @@ function FloraApp() {
     setScreen('home');
   };
 
-  const onSaveMatch = (match) => {
-    const entry = {
+  const onSaveMatch = async (match) => {
+    const date = new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    // Optimistic entry so the journal updates instantly. The real server
+    // entry replaces this one on success, or we roll it back on failure.
+    const tempId = 'tmp-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const optimistic = {
+      id: tempId,
       plant: match.plant,
-      photoUrl,
-      date: new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+      category: match.plant.category || 'other',
+      photoUrl, // base64 data URL — rendered locally until the server URL arrives
+      date,
       location: 'Captured here',
+      coords: null,
       note: match.plant.tagline || '',
+      _pending: true,
     };
-    addJournalEntry(entry);
-    setJournalVersion(v => v + 1);
+    setJournalEntries(prev => [optimistic, ...prev]);
+    setToast('Saving…');
+
+    // Wait up to 8s for geolocation. This is generous because the browser's
+    // first-use permission prompt can take several seconds to resolve, and
+    // a saved entry without coords won't show on the map.
+    let coords = null;
+    try { coords = await Promise.race([getGeo(), new Promise(r => setTimeout(() => r(null), 8000))]); }
+    catch { coords = null; }
+
+    try {
+      await apiSaveEntry({
+        plant: match.plant,
+        photoUrl,
+        date,
+        location: 'Captured here',
+        coords,
+        note: match.plant.tagline || '',
+      });
+      await refreshJournal();
+      setToast('Saved to journal');
+    } catch (e) {
+      console.error('[Flora] save failed', e);
+      setJournalEntries(prev => prev.filter(x => x.id !== tempId));
+      setToast(`Couldn't save: ${e.message}`);
+    }
   };
 
   const openDetail = (matchOrEntry) => {
-    // Accept either a ResultsScreen match {plant, conf} or a Journal entry {plant, photoUrl, ...}
+    // Accept either a ResultsScreen match {plant, conf} or a Journal entry {id, plant, photoUrl, ...}
     setActivePlant(matchOrEntry.plant);
     if (matchOrEntry.photoUrl) setPhotoUrl(matchOrEntry.photoUrl);
+    // Only treat as journal entry if it has a persisted id (server UUIDs, not 'tmp-' optimistic ones)
+    const isJournalEntry = matchOrEntry.id && !String(matchOrEntry.id).startsWith('tmp-');
+    setActiveJournalId(isJournalEntry ? matchOrEntry.id : null);
     setDetailReturn(screen); // remember where we came from
     setScreen('detail');
+  };
+
+  const handleDeleteJournalEntry = async (id) => {
+    await apiDeleteEntry(id);
+    await refreshJournal();
+    setActiveJournalId(null);
+    setScreen(detailReturn || 'journal');
+    setToast('Removed from journal');
   };
 
   const backFromDetail = () => {
@@ -2043,8 +2525,10 @@ function FloraApp() {
         <HomeScreen
           onCapture={startScan}
           onOpenJournal={() => setScreen('journal')}
+          onOpenMap={() => setScreen('map')}
           onSelectPlant={(plant) => openDetail({ plant, photoUrl: plant.photoUrl || null })}
           recentCount={recentCount}
+          recentEntries={journalEntries.slice(0, 3)}
         />
       )}
       {screen === 'scan' && (
@@ -2068,13 +2552,39 @@ function FloraApp() {
           plant={activePlant}
           photoUrl={photoUrl}
           onBack={backFromDetail}
+          journalId={activeJournalId}
+          onDelete={handleDeleteJournalEntry}
         />
       )}
       {screen === 'journal' && (
         <JournalScreen
+          entries={journalEntries}
+          loaded={journalLoaded}
+          onBack={() => setScreen('home')}
+          onSelect={openDetail}
+          onDeleted={refreshJournal}
+          setToast={setToast}
+        />
+      )}
+      {screen === 'map' && (
+        <MapScreen
+          entries={journalEntries}
           onBack={() => setScreen('home')}
           onSelect={openDetail}
         />
+      )}
+      {toast && (
+        <div style={{
+          position: 'fixed', left: '50%', bottom: 'calc(28px + env(safe-area-inset-bottom))',
+          transform: 'translateX(-50%)',
+          background: THEME.ink, color: '#fff',
+          padding: '10px 16px', borderRadius: 999,
+          fontSize: 13, fontWeight: 600,
+          boxShadow: '0 8px 24px rgba(0,0,0,0.25)',
+          maxWidth: '90%', textAlign: 'center',
+          zIndex: 200, pointerEvents: 'none',
+          animation: 'slideUp 180ms ease',
+        }}>{toast}</div>
       )}
     </div>
   );

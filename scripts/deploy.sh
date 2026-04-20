@@ -30,6 +30,8 @@ fi
 WORKER_NAME="${FLORA_WORKER_NAME:-flora}"
 HOSTNAME="${FLORA_HOSTNAME:-flora.clydeford.net}"
 ZONE_NAME="${FLORA_ZONE_NAME:-clydeford.net}"
+R2_BUCKET="${FLORA_R2_BUCKET:-flora-photos}"
+D1_DB_NAME="${FLORA_D1_DB:-flora}"
 API="https://api.cloudflare.com/client/v4"
 AUTH=(-H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}")
 
@@ -49,6 +51,42 @@ ZONE_ID=$(curl -s "${AUTH[@]}" "${API}/zones?name=${ZONE_NAME}" |
 [[ -n "${ZONE_ID}" ]] || die "Could not resolve zone ID for ${ZONE_NAME}"
 ok "Zone ID: ${ZONE_ID}"
 
+# ─── 2a. ENSURE R2 BUCKET ────────────────────────────────────────────
+say "Ensuring R2 bucket: ${R2_BUCKET}"
+R2_RESP=$(curl -s -X POST "${AUTH[@]}" -H "Content-Type: application/json" \
+  "${API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/r2/buckets" \
+  --data "{\"name\":\"${R2_BUCKET}\"}")
+if echo "${R2_RESP}" | grep -qE '"success":\s*true'; then
+  ok "R2 bucket created"
+elif echo "${R2_RESP}" | grep -qi 'already exists\|duplicate'; then
+  ok "R2 bucket already exists"
+else
+  echo "${R2_RESP}" >&2
+  die "R2 bucket provisioning failed"
+fi
+
+# ─── 2b. ENSURE D1 DATABASE ──────────────────────────────────────────
+say "Resolving D1 database: ${D1_DB_NAME}"
+D1_LIST=$(curl -s "${AUTH[@]}" "${API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database?name=${D1_DB_NAME}")
+D1_ID=$(printf '%s' "${D1_LIST}" | grep -oE '"uuid":"[a-f0-9-]+"' | head -1 | cut -d'"' -f4)
+if [[ -z "${D1_ID}" ]]; then
+  say "D1 database not found, creating"
+  D1_CREATE=$(curl -s -X POST "${AUTH[@]}" -H "Content-Type: application/json" \
+    "${API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database" \
+    --data "{\"name\":\"${D1_DB_NAME}\"}")
+  D1_ID=$(printf '%s' "${D1_CREATE}" | grep -oE '"uuid":"[a-f0-9-]+"' | head -1 | cut -d'"' -f4)
+  [[ -n "${D1_ID}" ]] || { echo "${D1_CREATE}" >&2; die "D1 create failed"; }
+fi
+ok "D1 ID: ${D1_ID}"
+
+# ─── 2c. APPLY SCHEMA MIGRATION ──────────────────────────────────────
+say "Applying D1 schema migration"
+MIG_RESP=$(curl -s -X POST "${AUTH[@]}" -H "Content-Type: application/json" \
+  "${API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database/${D1_ID}/query" \
+  --data '{"sql":"CREATE TABLE IF NOT EXISTS journal_entries (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, plant_json TEXT NOT NULL, category TEXT NOT NULL, date TEXT, location TEXT, lat REAL, lng REAL, note TEXT, photo_key TEXT, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_device_created ON journal_entries(device_id, created_at DESC);"}')
+echo "${MIG_RESP}" | grep -qE '"success":\s*true' || { echo "${MIG_RESP}" >&2; die "Migration failed"; }
+ok "Schema applied"
+
 # ─── 3. UPLOAD WORKER SCRIPT ─────────────────────────────────────────
 say "Uploading Worker: ${WORKER_NAME}"
 METADATA=$(cat <<EOF
@@ -56,6 +94,10 @@ METADATA=$(cat <<EOF
   "main_module": "worker.js",
   "compatibility_date": "2025-04-01",
   "compatibility_flags": ["nodejs_compat"],
+  "bindings": [
+    { "type": "d1", "name": "DB", "id": "${D1_ID}" },
+    { "type": "r2_bucket", "name": "PHOTOS", "bucket_name": "${R2_BUCKET}" }
+  ],
   "keep_bindings": ["secret_text"]
 }
 EOF
