@@ -9,10 +9,27 @@
 // Decode to raw bytes (NOT a JS string) so multi-byte UTF-8 chars like em-dash
 // and emojis survive the round-trip. Using a string + Response() would re-encode
 // each binary byte as UTF-8, doubling the encoding.
+function b64ToBytes(b64) {
+  return Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+}
+
 // eslint-disable-next-line no-undef
 const INDEX_HTML_BYTES = typeof INDEX_HTML_B64 !== 'undefined'
-  ? Uint8Array.from(atob(INDEX_HTML_B64), c => c.charCodeAt(0))
+  ? b64ToBytes(INDEX_HTML_B64)
   : new TextEncoder().encode('<h1>Not bundled — run scripts/build.sh</h1>');
+
+// PWA assets — manifest, service worker, icons. All decoded once at
+// cold-start and served with the right MIME types.
+// eslint-disable-next-line no-undef
+const MANIFEST_BYTES = typeof MANIFEST_B64 !== 'undefined' ? b64ToBytes(MANIFEST_B64) : null;
+// eslint-disable-next-line no-undef
+const SW_BYTES = typeof SW_B64 !== 'undefined' ? b64ToBytes(SW_B64) : null;
+// eslint-disable-next-line no-undef
+const ICON_192_BYTES = typeof ICON_192_B64 !== 'undefined' ? b64ToBytes(ICON_192_B64) : null;
+// eslint-disable-next-line no-undef
+const ICON_512_BYTES = typeof ICON_512_B64 !== 'undefined' ? b64ToBytes(ICON_512_B64) : null;
+// eslint-disable-next-line no-undef
+const ICON_MASK_BYTES = typeof ICON_MASK_B64 !== 'undefined' ? b64ToBytes(ICON_MASK_B64) : null;
 
 const IDENTIFY_SYSTEM_PROMPT = `You are a naturalist identifying plants, fungi, lichens and mosses from photographs. For each image, return up to 3 plausible matches, ordered by confidence (highest first). Respond with JSON ONLY — no prose, no markdown fences.
 
@@ -91,15 +108,36 @@ async function identify(request, env) {
     return json({ error: 'Invalid JSON body' }, 400);
   }
 
-  const image = body?.image;
-  if (typeof image !== 'string' || !image.startsWith('data:image/')) {
-    return json({ error: 'Expected { image: "data:image/...;base64,..." }' }, 400);
+  // Two modes:
+  //   1. Inline data URL — used for fresh scans
+  //   2. { entry_id, device_id } — re-identify a stored R2 photo without
+  //      requiring the client to upload the photo a second time
+  let mediaType, base64;
+  if (body?.entry_id && body?.device_id) {
+    if (!validateDeviceId(body.device_id)) return json({ error: 'Invalid device_id' }, 400);
+    const row = await env.DB.prepare(
+      `SELECT photo_key FROM journal_entries WHERE id = ? AND device_id = ?`
+    ).bind(body.entry_id, body.device_id).first();
+    if (!row || !row.photo_key) return json({ error: 'Entry or photo not found' }, 404);
+    const obj = await env.PHOTOS.get(row.photo_key);
+    if (!obj) return json({ error: 'Photo missing from R2' }, 404);
+    const buf = await obj.arrayBuffer();
+    mediaType = obj.httpMetadata?.contentType || 'image/jpeg';
+    // Convert to base64 for the Anthropic API
+    const bytes = new Uint8Array(buf);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    base64 = btoa(bin);
+  } else {
+    const image = body?.image;
+    if (typeof image !== 'string' || !image.startsWith('data:image/')) {
+      return json({ error: 'Expected { image: "data:image/...;base64,..." } or { entry_id, device_id }' }, 400);
+    }
+    const m = image.match(/^data:(image\/[a-zA-Z+]+);base64,(.+)$/);
+    if (!m) return json({ error: 'Malformed image data URL' }, 400);
+    mediaType = m[1];
+    base64 = m[2];
   }
-
-  const m = image.match(/^data:(image\/[a-zA-Z+]+);base64,(.+)$/);
-  if (!m) return json({ error: 'Malformed image data URL' }, 400);
-  const mediaType = m[1];
-  const base64 = m[2];
 
   if (!env.ANTHROPIC_API_KEY) {
     return json({ error: 'Server not configured: missing ANTHROPIC_API_KEY' }, 500);
@@ -180,6 +218,13 @@ function serveHtml() {
   });
 }
 
+function serveStatic(bytes, contentType, cacheControl) {
+  if (!bytes) return json({ error: 'Asset missing — rebuild' }, 500);
+  return new Response(bytes, {
+    headers: { 'content-type': contentType, 'cache-control': cacheControl },
+  });
+}
+
 // ── Journal (D1) + Photos (R2) ─────────────────────────────────────
 // Device ID is an anonymous client-generated UUID held in localStorage.
 // It's the only access key — entries are scoped by device_id, and deletes
@@ -241,14 +286,55 @@ async function journalPost(request, env) {
     });
   }
 
+  // Alternatives: the other Claude matches from the original scan. Stored
+  // as JSON so the user can flip to another ID later without re-scanning.
+  const alternativesJson = Array.isArray(body.alternatives) && body.alternatives.length
+    ? JSON.stringify(body.alternatives.slice(0, 5))
+    : null;
+
   await env.DB.prepare(
-    `INSERT INTO journal_entries (id, device_id, plant_json, category, date, location, lat, lng, note, photo_key, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO journal_entries (id, device_id, plant_json, category, date, location, lat, lng, note, photo_key, created_at, alternatives)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
-    id, deviceId, JSON.stringify(plant), category, date, location, lat, lng, note, photoKey, createdAt
+    id, deviceId, JSON.stringify(plant), category, date, location, lat, lng, note, photoKey, createdAt, alternativesJson
   ).run();
 
   return json({ id, photo_key: photoKey, created_at: createdAt });
+}
+
+async function journalPatch(request, env, id) {
+  let body;
+  try { body = await request.json(); }
+  catch { return json({ error: 'Invalid JSON' }, 400); }
+
+  const deviceId = body?.device_id;
+  if (!validateDeviceId(deviceId)) return json({ error: 'Invalid device_id' }, 400);
+  if (!id) return json({ error: 'Missing id' }, 400);
+
+  // Right now only plant + category + alternatives may be rewritten, which
+  // is enough to power "use this alternative" and "re-identify this capture".
+  const row = await env.DB.prepare(
+    `SELECT id FROM journal_entries WHERE id = ? AND device_id = ?`
+  ).bind(id, deviceId).first();
+  if (!row) return json({ error: 'Not found' }, 404);
+
+  const sets = [];
+  const values = [];
+  if (body.plant && typeof body.plant === 'object') {
+    sets.push('plant_json = ?'); values.push(JSON.stringify(body.plant));
+    const cat = typeof body.plant.category === 'string' ? body.plant.category : 'other';
+    sets.push('category = ?'); values.push(cat);
+  }
+  if (Array.isArray(body.alternatives)) {
+    sets.push('alternatives = ?'); values.push(body.alternatives.length ? JSON.stringify(body.alternatives.slice(0, 5)) : null);
+  }
+  if (!sets.length) return json({ error: 'No updatable fields' }, 400);
+
+  values.push(id, deviceId);
+  await env.DB.prepare(
+    `UPDATE journal_entries SET ${sets.join(', ')} WHERE id = ? AND device_id = ?`
+  ).bind(...values).run();
+  return json({ ok: true });
 }
 
 async function journalList(request, env) {
@@ -257,13 +343,17 @@ async function journalList(request, env) {
   if (!validateDeviceId(deviceId)) return json({ error: 'Invalid device_id' }, 400);
 
   const { results } = await env.DB.prepare(
-    `SELECT id, plant_json, category, date, location, lat, lng, note, photo_key, created_at
+    `SELECT id, plant_json, category, date, location, lat, lng, note, photo_key, created_at, alternatives
      FROM journal_entries WHERE device_id = ? ORDER BY created_at DESC LIMIT 500`
   ).bind(deviceId).all();
 
   const entries = (results || []).map(r => {
     let plant = null;
     try { plant = JSON.parse(r.plant_json); } catch { plant = null; }
+    let alternatives = [];
+    if (r.alternatives) {
+      try { alternatives = JSON.parse(r.alternatives) || []; } catch { alternatives = []; }
+    }
     return {
       id: r.id,
       plant,
@@ -274,6 +364,7 @@ async function journalList(request, env) {
       note: r.note || '',
       photoUrl: r.photo_key ? `/api/photos/${r.photo_key}` : null,
       createdAt: r.created_at,
+      alternatives,
     };
   });
   return json({ entries });
@@ -316,14 +407,26 @@ export default {
     if (path === '/api/identify') return identify(request, env);
     if (path === '/api/health') return json({ ok: true, ts: Date.now() });
 
+    // PWA assets
+    if (path === '/manifest.json') return serveStatic(MANIFEST_BYTES, 'application/manifest+json; charset=utf-8', 'public, max-age=3600');
+    if (path === '/sw.js') return serveStatic(SW_BYTES, 'application/javascript; charset=utf-8', 'public, max-age=0, must-revalidate');
+    if (path === '/icon-192.png') return serveStatic(ICON_192_BYTES, 'image/png', 'public, max-age=2592000, immutable');
+    if (path === '/icon-512.png') return serveStatic(ICON_512_BYTES, 'image/png', 'public, max-age=2592000, immutable');
+    if (path === '/icon-maskable-512.png') return serveStatic(ICON_MASK_BYTES, 'image/png', 'public, max-age=2592000, immutable');
+    // iOS doesn't read manifest icons; it looks for /apple-touch-icon.png.
+    if (path === '/apple-touch-icon.png' || path === '/apple-touch-icon-precomposed.png') {
+      return serveStatic(ICON_192_BYTES, 'image/png', 'public, max-age=2592000, immutable');
+    }
+
     if (path === '/api/journal') {
       if (request.method === 'POST') return journalPost(request, env);
       if (request.method === 'GET') return journalList(request, env);
       return json({ error: 'Method not allowed' }, 405);
     }
-    const delMatch = path.match(/^\/api\/journal\/([a-zA-Z0-9-]+)$/);
-    if (delMatch && request.method === 'DELETE') {
-      return journalDelete(request, env, delMatch[1]);
+    const entryMatch = path.match(/^\/api\/journal\/([a-zA-Z0-9-]+)$/);
+    if (entryMatch) {
+      if (request.method === 'DELETE') return journalDelete(request, env, entryMatch[1]);
+      if (request.method === 'PATCH') return journalPatch(request, env, entryMatch[1]);
     }
     if (path.startsWith('/api/photos/')) {
       return servePhoto(request, env, path.slice('/api/photos/'.length));

@@ -81,10 +81,27 @@ ok "D1 ID: ${D1_ID}"
 
 # ─── 2c. APPLY SCHEMA MIGRATION ──────────────────────────────────────
 say "Applying D1 schema migration"
+# Fresh-install schema (no-op if the table already exists).
 MIG_RESP=$(curl -s -X POST "${AUTH[@]}" -H "Content-Type: application/json" \
   "${API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database/${D1_ID}/query" \
-  --data '{"sql":"CREATE TABLE IF NOT EXISTS journal_entries (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, plant_json TEXT NOT NULL, category TEXT NOT NULL, date TEXT, location TEXT, lat REAL, lng REAL, note TEXT, photo_key TEXT, created_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS idx_device_created ON journal_entries(device_id, created_at DESC);"}')
+  --data '{"sql":"CREATE TABLE IF NOT EXISTS journal_entries (id TEXT PRIMARY KEY, device_id TEXT NOT NULL, plant_json TEXT NOT NULL, category TEXT NOT NULL, date TEXT, location TEXT, lat REAL, lng REAL, note TEXT, photo_key TEXT, created_at INTEGER NOT NULL, alternatives TEXT); CREATE INDEX IF NOT EXISTS idx_device_created ON journal_entries(device_id, created_at DESC);"}')
 echo "${MIG_RESP}" | grep -qE '"success":\s*true' || { echo "${MIG_RESP}" >&2; die "Migration failed"; }
+
+# Incremental ALTERs for pre-existing databases. SQLite has no IF NOT
+# EXISTS for columns, so we just run ALTER and swallow "duplicate column".
+d1_try_alter() {
+  local sql="$1"
+  local resp
+  resp=$(curl -s -X POST "${AUTH[@]}" -H "Content-Type: application/json" \
+    "${API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/d1/database/${D1_ID}/query" \
+    --data "{\"sql\":\"${sql}\"}")
+  if echo "${resp}" | grep -qE '"success":\s*true'; then return 0; fi
+  if echo "${resp}" | grep -qi 'duplicate column\|already exists'; then return 0; fi
+  echo "${resp}" >&2
+  return 1
+}
+d1_try_alter "ALTER TABLE journal_entries ADD COLUMN alternatives TEXT;" \
+  || die "Schema upgrade failed"
 ok "Schema applied"
 
 # ─── 3. UPLOAD WORKER SCRIPT ─────────────────────────────────────────

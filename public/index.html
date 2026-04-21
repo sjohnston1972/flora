@@ -5,9 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
 <meta name="theme-color" content="#ECF3E5" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="Flora" />
+<meta name="application-name" content="Flora" />
 <meta name="description" content="Flora — a pocket botanist. Identify plants from a photo." />
 <title>Flora — a pocket botanist</title>
+<link rel="manifest" href="/manifest.json" />
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+<link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png" />
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=Nunito+Sans:wght@400;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -202,7 +209,24 @@ const pickColors = (tox) => {
 // ── iNaturalist + geolocation ──────────────────────────────
 const INAT_BASE = 'https://api.inaturalist.org/v1';
 
+// Always fetch a fresh position — no caching. Use this whenever the
+// answer is "where am I *right now*", e.g. at photo capture time, so
+// coords reflect where the shot was taken rather than the cached
+// session position from minutes ago.
+function getGeoFresh() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) return reject(new Error('Geolocation not supported'));
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      (err) => reject(new Error(err.message || 'Location denied')),
+      { timeout: 10000, maximumAge: 0, enableHighAccuracy: true }
+    );
+  });
+}
+
 // Cache the geolocation prompt so we only ask once per page session.
+// Used for approximate location (nearby species load). Not for saves —
+// saves should use getGeoFresh() so walking around is reflected.
 let __geoPromise = null;
 function getGeo() {
   if (__geoPromise) return __geoPromise;
@@ -615,13 +639,13 @@ function downscalePhoto(dataUrl, maxDim = 1024, quality = 0.72) {
   });
 }
 
-async function apiSaveEntry({ plant, photoUrl, date, location, coords, note }) {
+async function apiSaveEntry({ plant, photoUrl, date, location, coords, note, alternatives }) {
   const device_id = getDeviceId();
   const image = photoUrl ? await downscalePhoto(photoUrl) : null;
   const res = await fetch('/api/journal', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ device_id, plant, date, location, coords, note, image }),
+    body: JSON.stringify({ device_id, plant, date, location, coords, note, image, alternatives }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -646,6 +670,34 @@ async function apiDeleteEntry(id) {
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || `Delete failed (${res.status})`);
+  }
+  return res.json();
+}
+
+async function apiPatchEntry(id, patch) {
+  const device_id = getDeviceId();
+  const res = await fetch(`/api/journal/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device_id, ...patch }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Update failed (${res.status})`);
+  }
+  return res.json();
+}
+
+async function apiReidentifyEntry(id) {
+  const device_id = getDeviceId();
+  const res = await fetch('/api/identify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ entry_id: id, device_id }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Re-identify failed (${res.status})`);
   }
   return res.json();
 }
@@ -675,7 +727,7 @@ const CAPTURE_PARTS = [
   { id: 'flower', label: 'flower' },
 ];
 
-function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEntries, onSelectPlant }) {
+function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEntries, onSelectPlant, onSelectEntry }) {
   const [capturing, setCapturing] = React.useState(false);
   const [sheetOpen, setSheetOpen] = React.useState(false);
   const [dragDelta, setDragDelta] = React.useState(0);
@@ -693,13 +745,26 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
     try { localStorage.setItem(PART_PREF_KEY, p); } catch {}
   };
 
+  // Drag starts anywhere on the panel. But: if the touch started inside a
+  // scrollable list (marked with data-scrollable) AND that list has scrolled,
+  // let native scroll handle it. Also: once the sheet is open, dragging down
+  // should close it even when the inner list isn't scrolled.
   const onHandleTouchStart = (e) => {
-    dragStartY.current = e.touches[0].clientY;
+    const touch = e.touches[0];
+    const inScroller = e.target.closest && e.target.closest('[data-scrollable]');
+    if (inScroller && inScroller.scrollTop > 0) {
+      dragStartY.current = null;
+      return;
+    }
+    dragStartY.current = touch.clientY;
   };
   const onHandleTouchMove = (e) => {
     if (dragStartY.current == null) return;
-    e.preventDefault();
-    setDragDelta(dragStartY.current - e.touches[0].clientY);
+    const delta = dragStartY.current - e.touches[0].clientY;
+    // Only prevent default once we've actually started a drag, otherwise
+    // tapping inside the panel feels janky.
+    if (Math.abs(delta) > 4 && e.cancelable) e.preventDefault();
+    setDragDelta(delta);
   };
   const onHandleTouchEnd = () => {
     if (dragStartY.current == null) return;
@@ -932,20 +997,22 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
             <IconBook size={16} stroke={THEME.ink} />
             <span style={{ fontSize: 13, fontWeight: 600, color: THEME.ink }}>Journal</span>
           </GlassChip>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {cameras.length > 1 && (
-              <GlassChip onClick={cycleCamera}>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={THEME.ink} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M23 4v6h-6M1 20v-6h6" />
-                  <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
-                </svg>
-                <span style={{ fontSize: 11, fontWeight: 700, color: THEME.ink }}>{activeCameraIdx + 1}/{cameras.length}</span>
-              </GlassChip>
-            )}
-            <GlassChip onClick={() => setDebugOpen(!debugOpen)}>
-              <span style={{ fontSize: 13, fontWeight: 700, color: THEME.ink, lineHeight: 1 }}>ⓘ</span>
+          {cameras.length > 1 && (
+            <GlassChip onClick={cycleCamera}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: THEME.ink, letterSpacing: 0.3 }}>
+                cam {activeCameraIdx + 1}/{cameras.length}
+              </span>
             </GlassChip>
-          </div>
+          )}
+          <GlassChip onClick={() => setDebugOpen(!debugOpen)}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: THEME.ink, lineHeight: 1 }}>ⓘ</span>
+          </GlassChip>
+          <GlassChip onClick={() => window.location.reload()} aria-label="Reload app">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={THEME.ink} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M23 4v6h-6M1 20v-6h6" />
+              <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
+            </svg>
+          </GlassChip>
         </div>
 
         {/* Debug panel — camera diagnostics */}
@@ -1016,29 +1083,31 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
         </div>
       </div>
 
-      {/* Lower panel — drag handle up/down or tap to toggle */}
-      <div style={{
-        position: 'absolute', bottom: 0, left: 0, right: 0,
-        height: `${liveHeightPct}%`,
-        background: THEME.bg,
-        borderTopLeftRadius: THEME.radius + 8,
-        borderTopRightRadius: THEME.radius + 8,
-        transition: dragStartY.current == null ? 'height 320ms cubic-bezier(0.34, 1.3, 0.4, 1)' : 'none',
-        boxShadow: '0 -8px 30px rgba(0,0,0,0.08)',
-        display: 'flex', flexDirection: 'column',
-      }}>
+      {/* Lower panel — drag anywhere on the panel to toggle open/closed */}
+      <div
+        onTouchStart={onHandleTouchStart}
+        onTouchMove={onHandleTouchMove}
+        onTouchEnd={onHandleTouchEnd}
+        onTouchCancel={onHandleTouchEnd}
+        style={{
+          position: 'absolute', bottom: 0, left: 0, right: 0,
+          height: `${liveHeightPct}%`,
+          background: THEME.bg,
+          borderTopLeftRadius: THEME.radius + 8,
+          borderTopRightRadius: THEME.radius + 8,
+          transition: dragStartY.current == null ? 'height 320ms cubic-bezier(0.34, 1.3, 0.4, 1)' : 'none',
+          boxShadow: '0 -8px 30px rgba(0,0,0,0.08)',
+          display: 'flex', flexDirection: 'column',
+          touchAction: 'pan-y',
+        }}
+      >
         <button
           onClick={() => setSheetOpen(!sheetOpen)}
-          onTouchStart={onHandleTouchStart}
-          onTouchMove={onHandleTouchMove}
-          onTouchEnd={onHandleTouchEnd}
-          onTouchCancel={onHandleTouchEnd}
           aria-label={sheetOpen ? 'Collapse panel' : 'Expand panel'}
           style={{
             padding: '14px 0 8px', width: '100%',
             display: 'flex', justifyContent: 'center', alignItems: 'center',
             cursor: 'grab', background: 'transparent',
-            touchAction: 'none',
           }}
         >
           <div style={{
@@ -1131,7 +1200,7 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
           })}
         </div>
 
-        <div style={{
+        <div data-scrollable="true" style={{
           flex: 1, minHeight: 0,
           overflowY: 'auto', WebkitOverflowScrolling: 'touch',
           padding: '4px 20px 20px',
@@ -1175,7 +1244,15 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
                   No entries yet. Capture a plant to get started.
                 </div>
               ) : (
-                recentJournal.map((j, i) => <JournalRow key={j.id || i} entry={j} />)
+                recentJournal.map((j, i) => (
+                  <div
+                    key={j.id || i}
+                    onClick={() => onSelectEntry && onSelectEntry(j)}
+                    style={{ cursor: 'pointer' }}
+                  >
+                    <JournalRow entry={j} />
+                  </div>
+                ))
               )}
             </div>
           )}
@@ -1693,9 +1770,91 @@ function ResultsScreen({ photoUrl, matches, onBack, onSelect, onSave }) {
      SCREEN — DETAIL
      ============================================================ -->
 <script type="text/babel">
-function DetailScreen({ plant, photoUrl, onBack, journalId, onDelete }) {
+function IdSwapSheet({ open, title, subtitle, matches, loading, error, onClose, onPick, extraAction }) {
+  if (!open) return null;
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)',
+      display: 'flex', alignItems: 'flex-end', zIndex: 120,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        width: '100%', maxHeight: '92%', background: THEME.bg,
+        borderTopLeftRadius: 24, borderTopRightRadius: 24,
+        padding: '16px 18px calc(18px + env(safe-area-inset-bottom))',
+        overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 12,
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ fontFamily: FONTS.heading, fontSize: 22, fontWeight: 500 }}>{title}</div>
+          <button onClick={onClose} style={{
+            width: 34, height: 34, borderRadius: '50%', border: 'none',
+            background: THEME.surface, fontSize: 20, lineHeight: 1, cursor: 'pointer',
+          }}>×</button>
+        </div>
+        {subtitle && (
+          <div style={{ fontSize: 13, color: THEME.inkMuted }}>{subtitle}</div>
+        )}
+        {loading && (
+          <div style={{
+            textAlign: 'center', padding: '24px 0', color: THEME.inkMuted, fontSize: 14,
+          }}>Asking Claude to take another look…</div>
+        )}
+        {error && !loading && (
+          <div style={{
+            background: '#FFE5E0', color: '#7A1F10', border: '1px solid #F3B7A9',
+            padding: '10px 12px', borderRadius: THEME.radiusSm, fontSize: 13,
+          }}>{error}</div>
+        )}
+        {!loading && matches && matches.length > 0 && matches.map((m, i) => (
+          <button key={i} onClick={() => onPick(m)} style={{
+            width: '100%', textAlign: 'left', border: 'none',
+            background: THEME.surface, boxShadow: THEME.shadow,
+            padding: 14, borderRadius: THEME.radiusSm, cursor: 'pointer',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+              <div style={{ fontFamily: FONTS.heading, fontSize: 18, fontWeight: 500 }}>
+                {m.plant?.common || '—'}
+              </div>
+              {typeof m.conf === 'number' && (
+                <div style={{ fontSize: 11, color: THEME.inkMuted, flexShrink: 0 }}>
+                  {Math.round(m.conf * 100)}% match
+                </div>
+              )}
+            </div>
+            <div style={{ fontSize: 12, fontStyle: 'italic', color: THEME.inkMuted }}>
+              {m.plant?.name || ''}
+            </div>
+            <div style={{ marginTop: 6, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+              {m.plant?.category && <CategoryChip category={m.plant.category} />}
+              {m.plant?.tagline && (
+                <span style={{ fontSize: 12, color: THEME.ink, lineHeight: 1.35 }}>
+                  {m.plant.tagline}
+                </span>
+              )}
+            </div>
+            <div style={{
+              marginTop: 10, fontSize: 12, color: THEME.accentDeep, fontWeight: 700,
+            }}>Use this one →</div>
+          </button>
+        ))}
+        {!loading && (!matches || matches.length === 0) && !error && (
+          <div style={{
+            background: THEME.surface, padding: 14, borderRadius: THEME.radiusSm,
+            color: THEME.inkMuted, fontSize: 13, textAlign: 'center',
+          }}>No alternatives available.</div>
+        )}
+        {extraAction}
+      </div>
+    </div>
+  );
+}
+
+function DetailScreen({ plant, photoUrl, onBack, journalId, onDelete, entry, onEntryUpdated, setToast }) {
   const [tab, setTab] = React.useState('overview');
   const [deleting, setDeleting] = React.useState(false);
+  const [sheetMode, setSheetMode] = React.useState(null); // 'alts' | 'reid' | null
+  const [freshMatches, setFreshMatches] = React.useState([]);
+  const [reidLoading, setReidLoading] = React.useState(false);
+  const [reidError, setReidError] = React.useState(null);
   if (!plant) return null;
 
   const handleDelete = async () => {
@@ -1704,6 +1863,50 @@ function DetailScreen({ plant, photoUrl, onBack, journalId, onDelete }) {
     setDeleting(true);
     try { await onDelete(journalId); }
     catch (e) { setDeleting(false); alert('Delete failed: ' + e.message); }
+  };
+
+  const storedAlternatives = (entry && Array.isArray(entry.alternatives)) ? entry.alternatives : [];
+
+  const openAlternatives = () => {
+    setReidError(null);
+    setFreshMatches([]);
+    setSheetMode('alts');
+  };
+
+  const openReidentify = async () => {
+    setSheetMode('reid');
+    setReidLoading(true);
+    setReidError(null);
+    setFreshMatches([]);
+    try {
+      const data = await apiReidentifyEntry(journalId);
+      const normalised = (data.matches || []).map(normaliseMatch);
+      setFreshMatches(normalised);
+    } catch (e) {
+      setReidError(e.message || 'Re-identify failed');
+    } finally {
+      setReidLoading(false);
+    }
+  };
+
+  const handlePick = async (picked) => {
+    if (!picked || !picked.plant) return;
+    try {
+      // Build the new alternatives list: everything else that was on offer
+      // in this sheet, minus the picked one. Fallback to the current plant
+      // so flipping back later is possible.
+      const sourceList = sheetMode === 'reid' ? freshMatches : storedAlternatives;
+      const newAlts = [
+        { plant, conf: null },
+        ...sourceList.filter(m => m && m.plant && m.plant.id !== picked.plant.id),
+      ].slice(0, 5);
+      await apiPatchEntry(journalId, { plant: picked.plant, alternatives: newAlts });
+      if (onEntryUpdated) await onEntryUpdated(picked.plant);
+      setSheetMode(null);
+      if (setToast) setToast('ID updated');
+    } catch (e) {
+      if (setToast) setToast(`Update failed: ${e.message}`);
+    }
   };
 
   return (
@@ -1759,6 +1962,30 @@ function DetailScreen({ plant, photoUrl, onBack, journalId, onDelete }) {
         </div>
       </div>
 
+      {journalId && (
+        <div style={{
+          display: 'flex', gap: 8, padding: '12px 16px 4px', flexShrink: 0,
+        }}>
+          <button onClick={openAlternatives} disabled={storedAlternatives.length === 0} style={{
+            flex: 1, padding: '10px 12px', borderRadius: THEME.radiusSm,
+            background: storedAlternatives.length ? THEME.accentSoft : THEME.surface,
+            color: storedAlternatives.length ? THEME.accentDeep : THEME.inkMuted,
+            border: 'none', fontSize: 12, fontWeight: 700, cursor: storedAlternatives.length ? 'pointer' : 'default',
+            letterSpacing: 0.2,
+          }}>
+            View alternatives{storedAlternatives.length ? ` (${storedAlternatives.length})` : ''}
+          </button>
+          <button onClick={openReidentify} style={{
+            flex: 1, padding: '10px 12px', borderRadius: THEME.radiusSm,
+            background: THEME.accent, color: '#fff',
+            border: 'none', fontSize: 12, fontWeight: 700, cursor: 'pointer',
+            letterSpacing: 0.2,
+          }}>
+            Update this capture
+          </button>
+        </div>
+      )}
+
       <div style={{
         display: 'flex', padding: '0 20px', gap: 4,
         borderBottom: `1px solid ${THEME.accentSoft}`, flexShrink: 0,
@@ -1782,6 +2009,25 @@ function DetailScreen({ plant, photoUrl, onBack, journalId, onDelete }) {
         {tab === 'nearby' && <NearbyTab plant={plant} />}
         {tab === 'similar' && <SimilarTab plant={plant} />}
       </div>
+
+      <IdSwapSheet
+        open={sheetMode === 'alts'}
+        title="Other matches from this scan"
+        subtitle={`Claude returned these alongside "${plant.common}". Tap one to make it the active ID.`}
+        matches={storedAlternatives}
+        onClose={() => setSheetMode(null)}
+        onPick={handlePick}
+      />
+      <IdSwapSheet
+        open={sheetMode === 'reid'}
+        title="Re-identify this capture"
+        subtitle="Asking Claude to take a fresh look at the stored photo. Pick any match to update the entry."
+        matches={freshMatches}
+        loading={reidLoading}
+        error={reidError}
+        onClose={() => setSheetMode(null)}
+        onPick={handlePick}
+      />
     </div>
   );
 }
@@ -2569,11 +2815,21 @@ function FloraApp() {
   const recentCount = journalEntries.length;
 
   const [scanPart, setScanPart] = React.useState(null);
+  // Coords grabbed at the instant the capture button is pressed. These
+  // ride through to the save, so the pin is where the photo was taken —
+  // not where the user happens to be when they tap Save later.
+  const captureCoordsPromise = React.useRef(null);
 
   const startScan = (dataUrl, part) => {
     setPhotoUrl(dataUrl);
     setMatches([]);
     setScanPart(part || null);
+    // Kick off a fresh location fetch in parallel with the scan. It races
+    // alongside the Claude call, so by save time it's almost always ready.
+    captureCoordsPromise.current = getGeoFresh().catch((err) => {
+      console.warn('[Flora] capture-time geolocation failed', err);
+      return null;
+    });
     setScreen('scan');
   };
 
@@ -2607,12 +2863,29 @@ function FloraApp() {
     setJournalEntries(prev => [optimistic, ...prev]);
     setToast('Saving…');
 
-    // Wait up to 8s for geolocation. This is generous because the browser's
-    // first-use permission prompt can take several seconds to resolve, and
-    // a saved entry without coords won't show on the map.
+    // Prefer the location grabbed at capture time (fresh at the moment of
+    // the shot). If it's still in flight, wait up to 8 s for it. Fallback
+    // to the session-cached getGeo() only if capture-time geo isn't
+    // available at all.
     let coords = null;
-    try { coords = await Promise.race([getGeo(), new Promise(r => setTimeout(() => r(null), 8000))]); }
-    catch { coords = null; }
+    if (captureCoordsPromise.current) {
+      try {
+        coords = await Promise.race([
+          captureCoordsPromise.current,
+          new Promise(r => setTimeout(() => r(null), 8000)),
+        ]);
+      } catch { coords = null; }
+    }
+    if (!coords) {
+      try { coords = await Promise.race([getGeo(), new Promise(r => setTimeout(() => r(null), 3000))]); }
+      catch { coords = null; }
+    }
+
+    // Persist the other matches so the user can flip to one later without
+    // needing to re-identify the photo.
+    const alternatives = matches
+      .filter(m => m && m.plant && m.plant.id !== match.plant.id)
+      .map(m => ({ plant: m.plant, conf: m.conf }));
 
     try {
       await apiSaveEntry({
@@ -2622,6 +2895,7 @@ function FloraApp() {
         location: 'Captured here',
         coords,
         note: match.plant.tagline || '',
+        alternatives,
       });
       await refreshJournal();
       setToast('Saved to journal');
@@ -2651,6 +2925,17 @@ function FloraApp() {
     setToast('Removed from journal');
   };
 
+  const handleEntryUpdated = async (newPlant) => {
+    if (newPlant) setActivePlant(newPlant);
+    await refreshJournal();
+  };
+
+  // The journal entry currently being viewed (for alternatives, etc).
+  const activeEntry = React.useMemo(
+    () => activeJournalId ? journalEntries.find(e => e.id === activeJournalId) : null,
+    [activeJournalId, journalEntries]
+  );
+
   const backFromDetail = () => {
     setScreen(detailReturn || 'home');
   };
@@ -2663,6 +2948,7 @@ function FloraApp() {
           onOpenJournal={() => setScreen('journal')}
           onOpenMap={() => setScreen('map')}
           onSelectPlant={(plant) => openDetail({ plant, photoUrl: plant.photoUrl || null })}
+          onSelectEntry={openDetail}
           recentCount={recentCount}
           recentEntries={journalEntries.slice(0, 3)}
         />
@@ -2690,7 +2976,10 @@ function FloraApp() {
           photoUrl={photoUrl}
           onBack={backFromDetail}
           journalId={activeJournalId}
+          entry={activeEntry}
           onDelete={handleDeleteJournalEntry}
+          onEntryUpdated={handleEntryUpdated}
+          setToast={setToast}
         />
       )}
       {screen === 'journal' && (
@@ -2729,6 +3018,18 @@ function FloraApp() {
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(<FloraApp />);
+</script>
+
+<script>
+  // Register the service worker for PWA install + offline shell.
+  // Only on HTTPS (which flora.clydeford.net is). Localhost also fine.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').catch((err) => {
+        console.warn('[Flora] SW registration failed', err);
+      });
+    });
+  }
 </script>
 
 </body>
