@@ -5,6 +5,7 @@
 //
 // Env bindings required (set via scripts/deploy.sh or wrangler):
 //   ANTHROPIC_API_KEY — secret used for the Claude Vision call
+//   PLANTNET_API_KEY  — secret used for the Pl@ntNet identification call
 
 // Decode to raw bytes (NOT a JS string) so multi-byte UTF-8 chars like em-dash
 // and emojis survive the round-trip. Using a string + Response() would re-encode
@@ -96,6 +97,55 @@ If you cannot identify the subject, return {"matches": []}.
 If the image does not contain a plant, fungus, lichen or moss, return {"matches": []}.
 Be conservative with confidence: 0.9+ only for textbook-clear identifications.`;
 
+const IDENTIFY_POOP_SYSTEM_PROMPT = `You are a wildlife tracker and scat-identification specialist. You are looking at a photograph of animal droppings (scat). For each image, return up to 3 plausible animal sources, ordered by confidence (highest first). Respond with JSON ONLY — no prose, no markdown fences.
+
+Schema:
+{
+  "matches": [
+    {
+      "common_name": "string — common animal name (e.g. 'Domestic dog', 'Red fox')",
+      "scientific_name": "string — Latin binomial of the animal",
+      "family": "string — animal family (e.g. 'Canidae')",
+      "category": "scat",
+      "confidence": 0.0-1.0,
+      "tagline": "one short sentence highlighting the most diagnostic feature",
+      "description": "2-3 sentences on what gives it away — size, shape, contents (bone fragments, hair, seeds, plant fibre, insect parts), colour, twist, taper, segmentation",
+      "native_range": "where this animal occurs",
+      "habitat": "where you typically encounter this scat (path, lawn, woodland edge, near water, latrine site, etc.)",
+      "edibility": "Do not handle without gloves. Animal scat can carry pathogens including roundworm, salmonella, leptospirosis, toxoplasmosis and giardia.",
+      "bloom": { "months": [], "label": "—" },
+      "toxicity": {
+        "level": "toxic" | "severe",
+        "note": "specific health risks from contact or accidental ingestion (e.g. 'Cat scat carries Toxoplasma gondii — pregnant women should avoid handling.')"
+      },
+      "care": { "light": "—", "water": "—", "humidity": "—", "temperature": "—" },
+      "tags": ["short", "tags", "like", "Carnivore", "Omnivore", "Fresh", "Berry-eater"],
+      "similar": [
+        {
+          "common_name": "string — another plausible animal",
+          "scientific_name": "string",
+          "differentiator": "one short sentence on what to look for to tell them apart — size, contents, shape, latrine behaviour"
+        }
+      ]
+    }
+  ]
+}
+
+Diagnostic guidance:
+- Size and shape: tubular vs pellet vs splat, twisted ends, tapered points, segmentation
+- Contents: hair, bone fragments, seeds, berry skins, plant fibre, insect chitin, grass — these give strong dietary signals
+- Colour and freshness: dark and moist = recent; pale and crumbling = old
+- Habitat context visible in the photo (path, lawn, woodland, near water, on a prominent rock)
+- Common temperate species to consider: domestic dog, domestic cat, red fox, badger, otter (spraint), pine marten, hedgehog, brown rat, grey squirrel, rabbit (round pellets), hare, deer (oval pellets), sheep, horse, cow, fox cub. In other regions consider coyote, raccoon, bear, bobcat, mountain lion, wolf, moose — adapt to plausible regional fauna.
+
+Safety rules (MANDATORY):
+- toxicity.level MUST be "toxic" or "severe" — never "safe"
+- toxicity.note MUST mention disease risk
+- edibility MUST start with "Do not handle without gloves."
+
+If the image does not contain animal scat, return {"matches": []}.
+Be conservative with confidence: 0.9+ only when distinctive features (size, contents, twist, segmentation) are clearly visible.`;
+
 async function identify(request, env) {
   if (request.method !== 'POST') {
     return json({ error: 'Method not allowed' }, 405);
@@ -139,17 +189,30 @@ async function identify(request, env) {
     base64 = m[2];
   }
 
-  if (!env.ANTHROPIC_API_KEY) {
-    return json({ error: 'Server not configured: missing ANTHROPIC_API_KEY' }, 500);
-  }
-
   // Optional hint about which part of the subject the photo shows. Helps
   // disambiguate when the visible features don't uniquely identify the species.
   const ALLOWED_PARTS = ['whole', 'leaf', 'flower', 'bark'];
   const part = ALLOWED_PARTS.includes(body?.part) ? body.part : null;
-  const partHint = part
+  const subject = body?.subject === 'poop' ? 'poop' : 'plant';
+
+  // Pl@ntNet only knows plants. Force Claude when identifying scat.
+  const requested = ['plantnet', 'hybrid', 'claude'].includes(body?.source) ? body.source : 'hybrid';
+  const source = subject === 'poop' ? 'claude' : requested;
+  if (source === 'plantnet') return identifyViaPlantnet({ env, mediaType, base64, part });
+  if (source === 'hybrid')   return identifyViaHybrid({ env, mediaType, base64, part });
+
+  if (!env.ANTHROPIC_API_KEY) {
+    return json({ error: 'Server not configured: missing ANTHROPIC_API_KEY' }, 500);
+  }
+
+  const partHint = part && subject === 'plant'
     ? ` The user has indicated this image shows the ${part === 'whole' ? 'whole subject' : part}.`
     : '';
+
+  const systemPrompt = subject === 'poop' ? IDENTIFY_POOP_SYSTEM_PROMPT : IDENTIFY_SYSTEM_PROMPT;
+  const userText = subject === 'poop'
+    ? 'Identify the animal source of this scat. Return JSON only per the schema in the system prompt.'
+    : `Identify the subject (plant, fungus, lichen or moss).${partHint} Return JSON only per the schema in the system prompt.`;
 
   const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -161,13 +224,13 @@ async function identify(request, env) {
     body: JSON.stringify({
       model: 'claude-sonnet-4-6',
       max_tokens: 2048,
-      system: IDENTIFY_SYSTEM_PROMPT,
+      system: systemPrompt,
       messages: [
         {
           role: 'user',
           content: [
             { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
-            { type: 'text', text: `Identify the subject (plant, fungus, lichen or moss).${partHint} Return JSON only per the schema in the system prompt.` },
+            { type: 'text', text: userText },
           ],
         },
       ],
@@ -196,6 +259,197 @@ async function identify(request, env) {
   }
   if (!parsed || !Array.isArray(parsed.matches)) parsed = { matches: [] };
   return json(parsed, 200);
+}
+
+// Calls the Pl@ntNet API and returns { ok, status, results } where results is
+// an array of { common, scientific, family, score }. Pulled out of the
+// HTTP-response layer so the hybrid path can re-use it.
+async function callPlantnet({ env, mediaType, base64, part }) {
+  const PART_TO_ORGAN = { leaf: 'leaf', flower: 'flower', bark: 'bark', whole: 'auto' };
+  const organ = PART_TO_ORGAN[part] || 'auto';
+
+  const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+  const ext = mediaType === 'image/png' ? 'png' : mediaType === 'image/webp' ? 'webp' : 'jpg';
+  const blob = new Blob([bytes], { type: mediaType });
+  const form = new FormData();
+  form.append('images', blob, `photo.${ext}`);
+  form.append('organs', organ);
+
+  const url = `https://my-api.plantnet.org/v2/identify/all?api-key=${encodeURIComponent(env.PLANTNET_API_KEY)}&include-related-images=false&no-reject=false`;
+  const res = await fetch(url, { method: 'POST', body: form });
+
+  // Pl@ntNet returns 404 + "Species Not Found" for an unmatched image —
+  // treat as an empty result, not an error.
+  if (res.status === 404) return { ok: true, status: 404, results: [] };
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    console.error('Pl@ntNet error', res.status, errText);
+    return { ok: false, status: res.status, error: errText.slice(0, 500) };
+  }
+
+  let data;
+  try { data = await res.json(); }
+  catch { return { ok: false, status: 502, error: 'Pl@ntNet returned non-JSON' }; }
+
+  const results = (Array.isArray(data?.results) ? data.results.slice(0, 3) : []).map(r => {
+    const sp = r.species || {};
+    const sci = sp.scientificNameWithoutAuthor || '';
+    return {
+      common: (Array.isArray(sp.commonNames) && sp.commonNames[0]) || sci || 'Unknown',
+      scientific: sci,
+      family: sp.family?.scientificNameWithoutAuthor || '',
+      score: typeof r.score === 'number' ? r.score : 0,
+    };
+  });
+  return { ok: true, status: 200, results };
+}
+
+// Pl@ntNet-only path: shape the species list into our standard match
+// schema with field-guide fields left blank.
+async function identifyViaPlantnet({ env, mediaType, base64, part }) {
+  if (!env.PLANTNET_API_KEY) {
+    return json({ error: 'Server not configured: missing PLANTNET_API_KEY' }, 500);
+  }
+  const r = await callPlantnet({ env, mediaType, base64, part });
+  if (!r.ok) return json({ error: `Pl@ntNet API error (${r.status})`, detail: r.error }, 502);
+
+  const matches = r.results.map(s => ({
+    common_name: s.common,
+    scientific_name: s.scientific,
+    family: s.family,
+    category: 'other',
+    confidence: s.score,
+    tagline: s.family ? `${s.family} family · identified by Pl@ntNet` : 'Identified by Pl@ntNet',
+    description: 'Match from the Pl@ntNet crowdsourced botanical database. No field-guide details available — switch to Hybrid or Claude for care notes, toxicity and similar species.',
+    native_range: '',
+    habitat: '',
+    edibility: '',
+    bloom: { months: [], label: '—' },
+    toxicity: { level: 'safe', note: 'Pl@ntNet provides no safety data. Verify before consumption or skin contact.' },
+    care: { light: '—', water: '—', humidity: '—', temperature: '—' },
+    tags: ['Pl@ntNet'],
+    similar: [],
+  }));
+  return json({ matches, source: 'plantnet' }, 200);
+}
+
+// Pl@ntNet identifies the species, Claude enriches each one with the
+// field-guide fields (care, toxicity, similar species, etc.). Single
+// text-only Claude call covers all candidates at once.
+const ENRICH_SYSTEM_PROMPT = `You are a botanical/mycological field-guide author. You will receive a list of candidate species already identified from a photograph by another system, with a confidence score and family for each. For each candidate, generate a structured field-guide entry. Respond with JSON ONLY — no prose, no markdown fences.
+
+Schema:
+{
+  "matches": [
+    {
+      "common_name": "string — prefer the one provided; improve if the provided one is just the scientific name and a better English common name exists",
+      "scientific_name": "string — preserve exactly as given",
+      "family": "string — preserve as given unless clearly wrong",
+      "category": "tree" | "shrub" | "flower" | "grass" | "fern" | "succulent" | "vine" | "fungus" | "lichen" | "moss" | "other",
+      "confidence": 0.0-1.0 (preserve the given score),
+      "tagline": "one short sentence for the reader",
+      "description": "2-3 sentences of useful field context",
+      "native_range": "string",
+      "habitat": "string",
+      "edibility": "string — for fungi ALWAYS prefix with 'Do not eat based on photo ID alone.' followed by edibility facts",
+      "bloom": { "months": [1-12 integers], "label": "human readable like 'May – September' or '—' if not applicable" },
+      "toxicity": {
+        "level": "safe" | "toxic" | "severe",
+        "note": "one-sentence safety note for humans and pets. For fungi, be explicit about lookalike risks."
+      },
+      "care": {
+        "light": "string",
+        "water": "string",
+        "humidity": "string",
+        "temperature": "string (e.g. '18–27°C')"
+      },
+      "tags": ["short", "tags", "like", "Houseplant", "Flowering", "Drought-tolerant"],
+      "similar": [
+        {
+          "common_name": "string",
+          "scientific_name": "string",
+          "differentiator": "one short sentence on how this differs from the main match — focus on a feature the user can actually check"
+        }
+      ]
+    }
+  ]
+}
+
+Preserve the order of the input list. Preserve scientific_name and confidence exactly. The "similar" array should hold up to 3 plausible look-alikes — for fungi this MUST include known toxic look-alikes when relevant. If you don't recognise a species, still fill in family/category-level guidance and acknowledge uncertainty in the tagline.`;
+
+async function enrichWithClaude({ env, candidates }) {
+  if (!env.ANTHROPIC_API_KEY) {
+    throw new Error('missing ANTHROPIC_API_KEY for Claude enrichment');
+  }
+  const userText = `Generate field-guide entries for these ${candidates.length} candidate species. Return JSON only per the schema in the system prompt.\n\n${
+    JSON.stringify(candidates.map(c => ({
+      common_name: c.common,
+      scientific_name: c.scientific,
+      family: c.family,
+      confidence: c.score,
+    })), null, 2)
+  }`;
+
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 3072,
+      system: ENRICH_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: [{ type: 'text', text: userText }] }],
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    console.error('Claude enrich error', res.status, errText);
+    throw new Error(`Claude API error (${res.status}): ${errText.slice(0, 200)}`);
+  }
+  const payload = await res.json();
+  const text = payload?.content?.find(c => c.type === 'text')?.text || '';
+  const cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+  const parsed = JSON.parse(cleaned);
+  if (!parsed || !Array.isArray(parsed.matches)) return { matches: [] };
+  return parsed;
+}
+
+async function identifyViaHybrid({ env, mediaType, base64, part }) {
+  if (!env.PLANTNET_API_KEY) {
+    return json({ error: 'Server not configured: missing PLANTNET_API_KEY' }, 500);
+  }
+  const r = await callPlantnet({ env, mediaType, base64, part });
+  if (!r.ok) return json({ error: `Pl@ntNet API error (${r.status})`, detail: r.error }, 502);
+  if (r.results.length === 0) return json({ matches: [], source: 'hybrid' }, 200);
+
+  let enriched;
+  try {
+    enriched = await enrichWithClaude({ env, candidates: r.results });
+  } catch (e) {
+    console.error('Hybrid enrich failed, falling back to plantnet-only', e);
+    // Fall back to the plain plantnet shape so the user still sees a result.
+    return identifyViaPlantnet({ env, mediaType, base64, part });
+  }
+
+  // Belt-and-braces: even if Claude rewrote them, snap the scientific name
+  // and confidence back to the Pl@ntNet values, in case the model drifted.
+  const matches = enriched.matches.slice(0, 3).map((m, i) => {
+    const src = r.results[i];
+    if (!src) return m;
+    const tags = Array.isArray(m.tags) ? Array.from(new Set([...m.tags, 'Pl@ntNet'])) : ['Pl@ntNet'];
+    return {
+      ...m,
+      scientific_name: src.scientific || m.scientific_name,
+      confidence: src.score,
+      tags,
+    };
+  });
+  return json({ matches, source: 'hybrid' }, 200);
 }
 
 function json(data, status = 200) {

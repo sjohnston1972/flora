@@ -720,11 +720,18 @@ function formatEntryTime(entry) {
      ============================================================ -->
 <script type="text/babel">
 const PART_PREF_KEY = 'flora:capture_part:v1';
+const SOURCE_PREF_KEY = 'flora:identifySource:v1';
+const SUBJECT_PREF_KEY = 'flora:subject:v1';
 const CAPTURE_PARTS = [
   { id: 'leaf', label: 'leaf' },
   { id: 'whole', label: 'whole plant' },
   { id: 'bark', label: 'bark' },
   { id: 'flower', label: 'flower' },
+];
+const ID_SOURCES = [
+  { id: 'claude', label: 'Claude' },
+  { id: 'plantnet', label: 'Pl@ntNet' },
+  { id: 'hybrid', label: 'Hybrid' },
 ];
 
 function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEntries, onSelectPlant, onSelectEntry }) {
@@ -735,6 +742,7 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
   const [nearby, setNearby] = React.useState(null); // null = loading, [] = empty/denied, [...] = data
   const [nearbyErr, setNearbyErr] = React.useState(null);
   const fileRef = React.useRef(null);
+  const uploadRef = React.useRef(null);
   const recentJournal = recentEntries || [];
   const [selectedPart, setSelectedPartRaw] = React.useState(() => {
     try { return localStorage.getItem(PART_PREF_KEY) || 'whole'; }
@@ -744,6 +752,25 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
     setSelectedPartRaw(p);
     try { localStorage.setItem(PART_PREF_KEY, p); } catch {}
   };
+  const [identifySource, setIdentifySourceRaw] = React.useState(() => {
+    try {
+      const v = localStorage.getItem(SOURCE_PREF_KEY);
+      return ID_SOURCES.some(s => s.id === v) ? v : 'hybrid';
+    } catch { return 'hybrid'; }
+  });
+  const setIdentifySource = (s) => {
+    setIdentifySourceRaw(s);
+    try { localStorage.setItem(SOURCE_PREF_KEY, s); } catch {}
+  };
+  const [subject, setSubjectRaw] = React.useState(() => {
+    try { return localStorage.getItem(SUBJECT_PREF_KEY) === 'poop' ? 'poop' : 'plant'; }
+    catch { return 'plant'; }
+  });
+  const setSubject = (s) => {
+    setSubjectRaw(s);
+    try { localStorage.setItem(SUBJECT_PREF_KEY, s); } catch {}
+  };
+  const isPoop = subject === 'poop';
 
   // Drag starts anywhere on the panel. But: if the touch started inside a
   // scrollable list (marked with data-scrollable) AND that list has scrolled,
@@ -920,7 +947,7 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
         canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
         const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
         // Brief visual pause so the capture button animation reads
-        setTimeout(() => onCapture(dataUrl, selectedPart), 220);
+        setTimeout(() => onCapture(dataUrl, selectedPart, identifySource, subject), 220);
       } catch (err) {
         console.error('Canvas capture failed', err);
         setCapturing(false);
@@ -939,12 +966,20 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
     setCapturing(true);
     try {
       const dataUrl = await shrinkImage(file);
-      onCapture(dataUrl, selectedPart);
+      onCapture(dataUrl, selectedPart, identifySource, subject);
     } catch (err) {
       console.error('image processing failed', err);
       setCapturing(false);
       alert('Could not read that image. Try another.');
     }
+  };
+
+  // Upload-from-gallery: same flow as a capture but pulls an existing
+  // photo from the device. Distinct from `fileRef` (which has
+  // capture="environment" and forces the camera on mobile).
+  const triggerUpload = () => {
+    if (capturing) return;
+    uploadRef.current?.click();
   };
 
   return (
@@ -953,23 +988,36 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
       background: THEME.bg, color: THEME.ink,
       fontFamily: FONTS.body, overflow: 'hidden',
     }}>
-      {/* hidden capture input */}
+      {/* hidden capture input — forces the camera on mobile */}
       <input
         ref={fileRef} type="file" accept="image/*" capture="environment"
         onChange={handleFile}
         style={{ position: 'absolute', width: 0, height: 0, opacity: 0 }}
       />
+      {/* hidden upload input — opens the gallery / file picker (no `capture`) */}
+      <input
+        ref={uploadRef} type="file" accept="image/*"
+        onChange={handleFile}
+        style={{ position: 'absolute', width: 0, height: 0, opacity: 0 }}
+      />
 
-      {/* Viewfinder — live camera feed, with gradient fallback */}
+      {/* Viewfinder — live camera feed, with gradient fallback. Palette
+          flips brown in poop mode so the letterbox + fallback match. */}
       <div
         style={{
           position: 'absolute', top: 0, left: 0, right: 0,
           height: '62%',
-          background: `
-            radial-gradient(ellipse at 30% 20%, ${THEME.accentGlow}66 0%, transparent 45%),
-            radial-gradient(ellipse at 70% 60%, ${THEME.accent}88 0%, transparent 50%),
-            linear-gradient(160deg, ${THEME.accentDeep} 0%, ${THEME.accent} 50%, ${THEME.accentGlow} 100%)
-          `,
+          background: isPoop
+            ? `
+              radial-gradient(ellipse at 30% 20%, #c89a6a66 0%, transparent 45%),
+              radial-gradient(ellipse at 70% 60%, #8a5a3288 0%, transparent 50%),
+              linear-gradient(160deg, #4f2e18 0%, #8a5a32 50%, #c89a6a 100%)
+            `
+            : `
+              radial-gradient(ellipse at 30% 20%, ${THEME.accentGlow}66 0%, transparent 45%),
+              radial-gradient(ellipse at 70% 60%, ${THEME.accent}88 0%, transparent 50%),
+              linear-gradient(160deg, ${THEME.accentDeep} 0%, ${THEME.accent} 50%, ${THEME.accentGlow} 100%)
+            `,
           overflow: 'hidden',
         }}
       >
@@ -1062,6 +1110,47 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
           </div>
         )}
 
+        {/* Subject toggle — bottom-left of the viewfinder. Tap to flip
+            between plant ID and poop ID. Active state tinted brown. */}
+        <button
+          onClick={() => setSubject(isPoop ? 'plant' : 'poop')}
+          aria-label={isPoop ? 'Switch back to plant ID' : 'Switch to poop ID'}
+          title={isPoop ? 'Plant mode' : 'Poop mode'}
+          style={{
+            position: 'absolute', left: 16, bottom: 16, zIndex: 10,
+            width: 44, height: 44, borderRadius: 999,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: isPoop ? 'rgba(120, 72, 40, 0.85)' : 'rgba(0,0,0,0.35)',
+            backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)',
+            border: `1px solid ${isPoop ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.25)'}`,
+            cursor: 'pointer', padding: 0,
+            fontSize: 22, lineHeight: 1,
+          }}
+        >
+          <span role="img" aria-hidden="true">💩</span>
+        </button>
+
+        {/* Upload-from-gallery — anchored to bottom-right of the viewfinder */}
+        <button
+          onClick={triggerUpload}
+          aria-label="Upload a photo from your device"
+          style={{
+            position: 'absolute', right: 16, bottom: 16, zIndex: 10,
+            width: 44, height: 44, borderRadius: 999,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: 'rgba(0,0,0,0.35)',
+            backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)',
+            border: '1px solid rgba(255,255,255,0.25)',
+            cursor: 'pointer', padding: 0,
+          }}
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+            <polyline points="17 8 12 3 7 8" />
+            <line x1="12" y1="3" x2="12" y2="15" />
+          </svg>
+        </button>
+
         {/* Coaching text — adapts to camera state */}
         <div style={{
           position: 'absolute', top: `calc(70px + env(safe-area-inset-top))`, left: 0, right: 0,
@@ -1077,7 +1166,9 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
             {cameraErr
               ? '📸 Tap the button to pick a photo'
               : cameraReady
-                ? '🌿 Frame the plant · tap the leaf to capture'
+                ? (isPoop
+                    ? '💩 Frame the scat · tap to identify'
+                    : '🌿 Frame the plant · tap the leaf to capture')
                 : '🌿 Starting camera…'}
           </div>
         </div>
@@ -1140,36 +1231,47 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
             )}
           </button>
 
-          <button
-            onClick={triggerCapture}
-            style={{
-              width: 86, height: 86, borderRadius: '50%',
-              cursor: 'pointer', padding: 0,
-              background: 'transparent', position: 'relative',
-            }}
-          >
-            <svg width="86" height="86" viewBox="0 0 86 86" style={{ position: 'absolute', inset: 0 }}>
-              <circle cx="43" cy="43" r="40" fill="none" stroke={THEME.accentSoft} strokeWidth="2" />
-              <circle cx="43" cy="43" r="40" fill="none" stroke={THEME.accent} strokeWidth="2.5"
-                strokeDasharray="4 10" opacity={capturing ? 1 : 0.5}
+          {(() => {
+            // Capture-button palette flips brown in poop mode.
+            const palette = isPoop
+              ? { glow: '#c89a6a', mid: '#8a5a32', deep: '#4f2e18', soft: 'rgba(138,90,50,0.25)' }
+              : { glow: THEME.accentGlow, mid: THEME.accent, deep: THEME.accentDeep, soft: THEME.accentSoft };
+            return (
+              <button
+                onClick={triggerCapture}
+                aria-label={isPoop ? 'Capture scat' : 'Capture plant'}
                 style={{
-                  transformOrigin: '43px 43px',
-                  animation: capturing ? 'spin 0.6s linear infinite' : 'spin 8s linear infinite',
-                }} />
-            </svg>
-            <div style={{
-              position: 'absolute', inset: 10, borderRadius: '50%',
-              background: `radial-gradient(circle at 35% 30%, ${THEME.accentGlow}, ${THEME.accent} 65%, ${THEME.accentDeep})`,
-              boxShadow: capturing
-                ? `0 0 0 8px ${THEME.accentSoft}, inset 0 -6px 12px rgba(0,0,0,0.2)`
-                : `inset 0 -6px 12px rgba(0,0,0,0.2), 0 4px 16px ${THEME.accent}55`,
-              transform: capturing ? 'scale(0.88)' : 'scale(1)',
-              transition: 'all 200ms ease',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-            }}>
-              <IconLeaf size={28} stroke="#fff" sw={2.2} />
-            </div>
-          </button>
+                  width: 86, height: 86, borderRadius: '50%',
+                  cursor: 'pointer', padding: 0,
+                  background: 'transparent', position: 'relative',
+                }}
+              >
+                <svg width="86" height="86" viewBox="0 0 86 86" style={{ position: 'absolute', inset: 0 }}>
+                  <circle cx="43" cy="43" r="40" fill="none" stroke={palette.soft} strokeWidth="2" />
+                  <circle cx="43" cy="43" r="40" fill="none" stroke={palette.mid} strokeWidth="2.5"
+                    strokeDasharray="4 10" opacity={capturing ? 1 : 0.5}
+                    style={{
+                      transformOrigin: '43px 43px',
+                      animation: capturing ? 'spin 0.6s linear infinite' : 'spin 8s linear infinite',
+                    }} />
+                </svg>
+                <div style={{
+                  position: 'absolute', inset: 10, borderRadius: '50%',
+                  background: `radial-gradient(circle at 35% 30%, ${palette.glow}, ${palette.mid} 65%, ${palette.deep})`,
+                  boxShadow: capturing
+                    ? `0 0 0 8px ${palette.soft}, inset 0 -6px 12px rgba(0,0,0,0.2)`
+                    : `inset 0 -6px 12px rgba(0,0,0,0.2), 0 4px 16px ${palette.mid}55`,
+                  transform: capturing ? 'scale(0.88)' : 'scale(1)',
+                  transition: 'all 200ms ease',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>
+                  {isPoop
+                    ? <span role="img" aria-hidden="true" style={{ fontSize: 36, lineHeight: 1 }}>💩</span>
+                    : <IconLeaf size={28} stroke="#fff" sw={2.2} />}
+                </div>
+              </button>
+            );
+          })()}
 
           <button onClick={onOpenMap} aria-label="Open discoveries map" style={{
             width: 48, height: 48, borderRadius: THEME.radiusSm,
@@ -1181,24 +1283,59 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
           </button>
         </div>
 
-        <div style={{
-          display: 'flex', justifyContent: 'center', gap: 8,
-          padding: '0 16px 14px', flexWrap: 'wrap',
-        }}>
-          {CAPTURE_PARTS.map(p => {
-            const active = selectedPart === p.id;
-            return (
-              <button key={p.id} onClick={() => setSelectedPart(p.id)} style={{
-                padding: '6px 14px', borderRadius: 999, border: 'none',
-                background: active ? THEME.accent : 'transparent',
-                color: active ? '#fff' : THEME.inkMuted,
-                fontSize: 13, fontWeight: 600, cursor: 'pointer',
-                boxShadow: active ? THEME.shadow : 'inset 0 0 0 1px rgba(0,0,0,0.08)',
-                transition: 'background 160ms, color 160ms',
-              }}>{p.label}</button>
-            );
-          })}
-        </div>
+        {!isPoop && (
+          <div style={{
+            display: 'flex', justifyContent: 'center', gap: 8,
+            padding: '0 16px 8px', flexWrap: 'wrap',
+          }}>
+            {CAPTURE_PARTS.map(p => {
+              const active = selectedPart === p.id;
+              return (
+                <button key={p.id} onClick={() => setSelectedPart(p.id)} style={{
+                  padding: '6px 14px', borderRadius: 999, border: 'none',
+                  background: active ? THEME.accent : 'transparent',
+                  color: active ? '#fff' : THEME.inkMuted,
+                  fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                  boxShadow: active ? THEME.shadow : 'inset 0 0 0 1px rgba(0,0,0,0.08)',
+                  transition: 'background 160ms, color 160ms',
+                }}>{p.label}</button>
+              );
+            })}
+          </div>
+        )}
+
+        {isPoop ? (
+          <div style={{
+            display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 6,
+            padding: '0 16px 14px',
+          }}>
+            <span style={{
+              fontSize: 11, color: THEME.inkMuted,
+              padding: '4px 10px', borderRadius: 999,
+              background: 'rgba(120, 72, 40, 0.10)',
+            }}>💩 Poop mode · ID by Claude</span>
+          </div>
+        ) : (
+          <div style={{
+            display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 6,
+            padding: '0 16px 14px',
+          }}>
+            <span style={{ fontSize: 11, color: THEME.inkMuted, marginRight: 4 }}>ID by</span>
+            {ID_SOURCES.map(s => {
+              const active = identifySource === s.id;
+              return (
+                <button key={s.id} onClick={() => setIdentifySource(s.id)} style={{
+                  padding: '4px 10px', borderRadius: 999, border: 'none',
+                  background: active ? THEME.ink : 'transparent',
+                  color: active ? '#fff' : THEME.inkMuted,
+                  fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                  boxShadow: active ? THEME.shadow : 'inset 0 0 0 1px rgba(0,0,0,0.08)',
+                  transition: 'background 160ms, color 160ms',
+                }}>{s.label}</button>
+              );
+            })}
+          </div>
+        )}
 
         <div data-scrollable="true" style={{
           flex: 1, minHeight: 0,
@@ -1268,7 +1405,7 @@ function HomeScreen({ onCapture, onOpenJournal, onOpenMap, recentCount, recentEn
      SCREEN — SCAN (calls /api/identify while showing radar)
      ============================================================ -->
 <script type="text/babel">
-function ScanScreen({ photoUrl, part, onComplete, onError }) {
+function ScanScreen({ photoUrl, part, source, subject, onComplete, onError }) {
   const [progress, setProgress] = React.useState(0);
   const [detected, setDetected] = React.useState([]);
   const [statusLabel, setStatusLabel] = React.useState('Reading shape, colour, texture…');
@@ -1303,7 +1440,7 @@ function ScanScreen({ photoUrl, part, onComplete, onError }) {
         const res = await fetch('/api/identify', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image: photoUrl, part: part || undefined }),
+          body: JSON.stringify({ image: photoUrl, part: part || undefined, source: source || undefined, subject: subject || undefined }),
         });
         if (!res.ok) {
           const text = await res.text().catch(() => '');
@@ -2331,12 +2468,12 @@ function SimilarTab({ plant }) {
 <script type="text/babel">
 const FILTERS = [
   'All', 'Pet safe', 'Flowering now', 'Toxic',
-  'Trees', 'Shrubs', 'Flowers', 'Fungi', 'Succulents', 'Ferns', 'Grasses', 'Vines', 'Mosses', 'Lichens',
+  'Trees', 'Shrubs', 'Flowers', 'Fungi', 'Succulents', 'Ferns', 'Grasses', 'Vines', 'Mosses', 'Lichens', 'Scat',
 ];
 const FILTER_TO_CATEGORY = {
   Trees: 'tree', Shrubs: 'shrub', Flowers: 'flower', Fungi: 'fungus',
   Succulents: 'succulent', Ferns: 'fern', Grasses: 'grass', Vines: 'vine',
-  Mosses: 'moss', Lichens: 'lichen',
+  Mosses: 'moss', Lichens: 'lichen', Scat: 'scat',
 };
 
 function applyJournalFilter(entries, filter) {
@@ -2544,6 +2681,7 @@ const MAP_MARKER_BY_CATEGORY = {
   fungus:    { emoji: '🍄', color: '#b04a3a' },
   lichen:    { emoji: '🪨', color: '#7c8a85' },
   moss:      { emoji: '🌱', color: '#4f9c5e' },
+  scat:      { emoji: '💩', color: '#7a4a28' },
   other:     { emoji: '📍', color: '#6b7b63' },
 };
 
@@ -2727,7 +2865,7 @@ function MapScreen({ entries = [], onBack, onSelect }) {
      APP SHELL
      ============================================================ -->
 <script type="text/babel">
-const VALID_CATEGORIES = ['tree', 'shrub', 'flower', 'grass', 'fern', 'succulent', 'vine', 'fungus', 'lichen', 'moss', 'other'];
+const VALID_CATEGORIES = ['tree', 'shrub', 'flower', 'grass', 'fern', 'succulent', 'vine', 'fungus', 'lichen', 'moss', 'scat', 'other'];
 
 function normaliseMatch(m) {
   // Claude returns structured data matching this shape. Defensive defaults for anything missing.
@@ -2778,7 +2916,7 @@ function normaliseMatch(m) {
 const CATEGORY_LABEL = {
   tree: 'Tree', shrub: 'Shrub', flower: 'Flower', grass: 'Grass', fern: 'Fern',
   succulent: 'Succulent', vine: 'Vine', fungus: 'Fungus', lichen: 'Lichen',
-  moss: 'Moss', other: 'Other',
+  moss: 'Moss', scat: 'Scat', other: 'Other',
 };
 
 function FloraApp() {
@@ -2815,15 +2953,23 @@ function FloraApp() {
   const recentCount = journalEntries.length;
 
   const [scanPart, setScanPart] = React.useState(null);
+  const [scanSource, setScanSource] = React.useState('hybrid');
+  const [scanSubject, setScanSubject] = React.useState('plant');
   // Coords grabbed at the instant the capture button is pressed. These
   // ride through to the save, so the pin is where the photo was taken —
   // not where the user happens to be when they tap Save later.
   const captureCoordsPromise = React.useRef(null);
 
-  const startScan = (dataUrl, part) => {
+  const startScan = (dataUrl, part, source, subject) => {
     setPhotoUrl(dataUrl);
     setMatches([]);
     setScanPart(part || null);
+    const sub = subject === 'poop' ? 'poop' : 'plant';
+    setScanSubject(sub);
+    // Pl@ntNet only knows plants — coerce to claude in poop mode.
+    const eff = sub === 'poop' ? 'claude'
+      : (['plantnet', 'hybrid', 'claude'].includes(source) ? source : 'hybrid');
+    setScanSource(eff);
     // Kick off a fresh location fetch in parallel with the scan. It races
     // alongside the Claude call, so by save time it's almost always ready.
     captureCoordsPromise.current = getGeoFresh().catch((err) => {
@@ -2957,6 +3103,8 @@ function FloraApp() {
         <ScanScreen
           photoUrl={photoUrl}
           part={scanPart}
+          source={scanSource}
+          subject={scanSubject}
           onComplete={onScanComplete}
           onError={onScanError}
         />

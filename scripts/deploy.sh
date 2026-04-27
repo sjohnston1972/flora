@@ -26,6 +26,7 @@ fi
 : "${CLOUDFLARE_API_TOKEN:?CLOUDFLARE_API_TOKEN not set}"
 : "${CLOUDFLARE_ACCOUNT_ID:?CLOUDFLARE_ACCOUNT_ID not set}"
 : "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY not set}"
+: "${PLANTNET_API_KEY:?PLANTNET_API_KEY not set}"
 
 WORKER_NAME="${FLORA_WORKER_NAME:-flora}"
 HOSTNAME="${FLORA_HOSTNAME:-flora.clydeford.net}"
@@ -131,23 +132,30 @@ echo "${UPLOAD_RESP}" | grep -qE '"success":\s*true' || {
 }
 ok "Worker uploaded"
 
-# ─── 4. SET SECRET ───────────────────────────────────────────────────
-# The Anthropic API key uses safe characters (alnum + `-_`), so inline JSON is fine.
+# ─── 4. SET SECRETS ──────────────────────────────────────────────────
+# Both API keys use safe characters (alnum + `-_`), so inline JSON is fine.
 # Verify before sending, so a bad key doesn't silently ship.
-if [[ ! "${ANTHROPIC_API_KEY}" =~ ^[A-Za-z0-9_-]+$ ]]; then
-  die "ANTHROPIC_API_KEY contains unexpected characters — refusing to embed in JSON without escaping"
-fi
-say "Setting ANTHROPIC_API_KEY secret"
-SECRET_BODY=$(printf '{"name":"ANTHROPIC_API_KEY","text":"%s","type":"secret_text"}' "${ANTHROPIC_API_KEY}")
-SECRET_RESP=$(curl -s -X PUT "${AUTH[@]}" \
-  -H "Content-Type: application/json" \
-  "${API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${WORKER_NAME}/secrets" \
-  --data "${SECRET_BODY}")
-echo "${SECRET_RESP}" | grep -qE '"success":\s*true' || {
-  echo "${SECRET_RESP}" >&2
-  die "Failed to set secret"
+put_secret() {
+  local name="$1" value="$2"
+  if [[ ! "${value}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    die "${name} contains unexpected characters — refusing to embed in JSON without escaping"
+  fi
+  say "Setting ${name} secret"
+  local body resp
+  body=$(printf '{"name":"%s","text":"%s","type":"secret_text"}' "${name}" "${value}")
+  resp=$(curl -s -X PUT "${AUTH[@]}" \
+    -H "Content-Type: application/json" \
+    "${API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/${WORKER_NAME}/secrets" \
+    --data "${body}")
+  echo "${resp}" | grep -qE '"success":\s*true' || {
+    echo "${resp}" >&2
+    die "Failed to set ${name}"
+  }
+  ok "${name} set"
 }
-ok "Secret set"
+
+put_secret "ANTHROPIC_API_KEY" "${ANTHROPIC_API_KEY}"
+put_secret "PLANTNET_API_KEY"  "${PLANTNET_API_KEY}"
 
 # ─── 5. BIND CUSTOM DOMAIN ───────────────────────────────────────────
 say "Binding custom domain ${HOSTNAME} (creates DNS + route)"
